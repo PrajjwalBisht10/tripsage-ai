@@ -1,0 +1,104 @@
+# TripSage Documentation
+
+Complete technical documentation for TripSage AI, an AI-powered travel planning platform.
+
+## Documentation by Audience
+
+### End Users
+
+- **[User Guide](users/user-guide.md)** - Complete guide for planning and
+  managing trips
+
+### API Developers
+
+- **[API Reference](api/api-reference.md)** - Complete REST API
+  documentation with examples
+- **[Authentication](api/api-reference.md#authentication)** - JWT and API key authentication
+- **[Error Codes](api/error-codes.md)** - Error handling reference
+- **[Realtime API](api/realtime-api.md)** - Supabase Realtime integration
+
+### Application Developers
+
+- **Final baseline (2026-01-05)**:
+  - **[System Architecture](architecture/system-overview.md)** - Runtime topology, key capabilities, and workflows
+  - **[Repo Structure](architecture/repo-structure.md)** - Feature-first layout and server-only boundaries
+  - **[Architecture Decisions (ADRs)](architecture/decisions/index.md)** - Canonical ADR index
+  - **[Technical Specs](specs/README.md)** - Canonical specs index
+  - **[Deployment Runbook (Vercel)](runbooks/deployment-vercel.md)** - Vercel + Supabase + Upstash
+  - **[PRD](product/prd.md)** and **[Wireframes](product/wireframes.md)**
+
+- **[Quick Start](development/core/quick-start.md)** - Get development environment
+  running
+- **[Development Guide](development/core/development-guide.md)** - Architecture
+  overview, key patterns, and documentation index
+- **[Standards](development/standards/standards.md)** - Code style, import paths, schemas, stores
+- **[Zod Schema Guide](development/standards/zod-schema-guide.md)** - Zod v4 schema patterns, validation, and AI SDK tool schemas
+- **[Testing](development/testing/testing.md)** - Strategy, patterns, and templates
+- **[AI Integration](development/ai/ai-integration.md)** - Gateway/BYOK options for Vercel AI SDK v6
+- **[AI Tools Guide](development/ai/ai-tools.md)** - createAiTool factory with caching, rate limiting, and telemetry guardrails
+- **[Maintenance](maintenance.md)** - Development maintenance checklist
+
+### Operators & DevOps
+
+- **[Operators Reference](operations/operators-reference.md)** -
+  Deployment, configuration, and operations
+- **[Security Guide](operations/security-guide.md)** - Security
+  implementation and best practices
+- **[Deployment Guide](operations/deployment-guide.md)** - Production
+  deployment procedures
+
+## Quick Setup
+
+See [Quick Start](development/core/quick-start.md) for the canonical, up-to-date
+setup steps and verification commands.
+
+## Key Features
+
+### For End Users
+
+- **AI-Powered Planning**: Natural language trip planning with personalized recommendations
+- **Real-Time Search**: Live flight, hotel, and activity search with instant updates
+- **Collaborative Planning**: Share trips and plan together with travel companions
+- **Budget Management**: Track expenses and manage spending across trip components
+- **Mobile Access**: Progressive Web App with offline capabilities
+
+### For Developers
+
+- **REST API**: Complete HTTP API with OpenAPI specification
+- **Real-Time Updates**: Supabase Realtime for live collaboration features
+- **Authentication**: JWT tokens and API keys with Supabase integration
+- **Rate Limiting**: Built-in rate limiting with Redis-backed counters
+- **Type Safety**: Full TypeScript support with generated client SDKs
+
+### For Operators
+
+- **Vercel Deployments**: Next.js 16 on Node runtime (Edge opt-in) with managed previews and rollbacks
+- **Monitoring**: Built-in health checks and observability with
+  OpenTelemetry
+- **Security**: Row Level Security, encryption, and comprehensive audit
+  logging
+- **Scalability**: Horizontal scaling with load balancers and caching layers
+
+## Architecture Overview
+
+TripSage uses a modern, unified architecture:
+
+- **Backend**: Next.js 16 server-first route handlers (TypeScript)
+- **Database**: Supabase PostgreSQL with Row Level Security and vector
+  extensions
+- **Cache**: Upstash Redis (HTTP) for serverless caching
+- **Frontend**: Next.js 16 with React 19 and TypeScript
+- **Real-Time**: Supabase Realtime with private channels
+- **AI**: Vercel AI SDK v6 with streaming chat and agent tool calling
+
+## Support & Community
+
+- **Documentation**: Search the user guide or API reference for answers
+- **GitHub Issues**: Report bugs and request features
+- **Community**: Join discussions and share knowledge
+
+---
+
+**Getting Started**: New to TripSage? Start with the
+[User Guide](users/user-guide.md) or
+[API Reference](api/api-reference.md).

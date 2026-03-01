@@ -1,0 +1,76 @@
+# CODEOWNERS file for TripSage AI
+# https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# These owners will be the default owners for everything in the repo.
+# Unless a later match takes precedence, these owners will be requested
+# for review when someone opens a pull request.
+#
+# Order is important; the last matching pattern takes the most precedence.
+# When someone opens a pull request that only modifies files in specific
+# directories, only those code owners will be requested for a review.
+
+# Default owners for everything in the repo
+* @BjornMelin
+
+# GitHub workflows and CI/CD configuration
+/.github/ @BjornMelin
+/.github/workflows/ @BjornMelin
+/.github/dependabot.yml @BjornMelin
+/.github/CODEOWNERS @BjornMelin
+/.github/ci-config.yml @BjornMelin
+
+# Tooling and scripts
+/scripts/ @BjornMelin
+/supabase/migrations/ @BjornMelin
+
+# Next.js code ownership (flattened to root)
+/src/ @BjornMelin
+/package.json @BjornMelin
+/pnpm-lock.yaml @BjornMelin
+/tsconfig.json @BjornMelin
+/next.config.ts @BjornMelin
+/tailwind.config.mjs @BjornMelin
+
+# Testing
+/e2e/ @BjornMelin
+/playwright.config.ts @BjornMelin
+/vitest.config.ts @BjornMelin
+/src/**/*.test.ts @BjornMelin
+/src/**/*.test.tsx @BjornMelin
+
+# Documentation
+*.md @BjornMelin
+/docs/ @BjornMelin
+README.md @BjornMelin
+CLAUDE.md @BjornMelin
+
+# Infrastructure and deployment
+/docker/ @BjornMelin
+Dockerfile @BjornMelin
+/docker/Dockerfile.dev @BjornMelin
+docker-compose*.yml @BjornMelin
+.dockerignore @BjornMelin
+/supabase/ @BjornMelin
+
+# Security-sensitive files
+.env* @BjornMelin
+**/secrets/ @BjornMelin
+**/credentials/ @BjornMelin
+
+# Development tools configuration
+.gitignore @BjornMelin
+.gitattributes @BjornMelin
+.editorconfig @BjornMelin
+.pre-commit-config.yaml @BjornMelin
+.ruff.toml @BjornMelin
+.mypy.ini @BjornMelin
+biome.json @BjornMelin
+
+# Quality assurance files
+/coverage/ @BjornMelin
+.coverage @BjornMelin
+htmlcov/ @BjornMelin
+
+# Monitoring and observability
+/tripsage/monitoring/ @BjornMelin
+/tripsage/telemetry/ @BjornMelin

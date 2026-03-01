@@ -1,0 +1,666 @@
+/**
+ * @fileoverview Accommodations domain service orchestrating provider calls, caching, and booking.
+ */
+
+import "server-only";
+
+import { runBookingOrchestrator } from "@domain/accommodations/booking-orchestrator";
+import { ProviderError } from "@domain/accommodations/errors";
+import type {
+  AccommodationProviderAdapter,
+  ProviderContext,
+  ProviderResult,
+} from "@domain/accommodations/providers/types";
+import type {
+  AccommodationBookingInsert,
+  TripOwnership,
+} from "@domain/accommodations/types";
+import {
+  type AccommodationBookingRequest,
+  type AccommodationBookingResult,
+  type AccommodationCheckAvailabilityParams,
+  type AccommodationCheckAvailabilityResult,
+  type AccommodationDetailsParams,
+  type AccommodationDetailsResult,
+  type AccommodationSearchParams,
+  type AccommodationSearchResult,
+  accommodationBookingOutputSchema,
+  accommodationCheckAvailabilityOutputSchema,
+  accommodationDetailsOutputSchema,
+  accommodationSearchOutputSchema,
+} from "@schemas/accommodations";
+import type { ProcessedPayment } from "@/lib/payments/booking-payment";
+import { secureUuid } from "@/lib/security/random";
+
+type HotelLikeListing = {
+  hotel?: {
+    name?: string;
+    address?: {
+      cityName?: string;
+      lines?: string[];
+    };
+  };
+};
+
+type TelemetrySpanAttributes = Record<string, string | number | boolean>;
+type TelemetrySpan = {
+  addEvent: (name: string, attributes?: TelemetrySpanAttributes) => void;
+  recordException: (error: Error) => void;
+};
+
+/** Dependencies for the accommodations service. */
+export type AccommodationsServiceDeps = {
+  provider: AccommodationProviderAdapter;
+  cacheTtlSeconds: number;
+  bumpTag: (tag: string) => Promise<number>;
+  canonicalizeParamsForCache: (
+    params: Record<string, unknown>,
+    prefix: string
+  ) => string;
+  enrichHotelListingWithPlaces: <T extends HotelLikeListing>(
+    listing: T
+  ) => Promise<T & { place?: unknown; placeDetails?: unknown }>;
+  getCachedJson: <T>(key: string) => Promise<T | null>;
+  resolveLocationToLatLng: (
+    location: string
+  ) => Promise<{ lat: number; lon: number } | null>;
+  retryWithBackoff: <T>(
+    fn: (attempt: number) => Promise<T>,
+    options: { attempts: number; baseDelayMs: number; maxDelayMs?: number }
+  ) => Promise<T>;
+  getTripOwnership: (tripId: number, userId: string) => Promise<TripOwnership | null>;
+  persistBooking: (
+    bookingRow: AccommodationBookingInsert
+  ) => Promise<{ error: unknown | null }>;
+  setCachedJson: (key: string, value: unknown, ttlSeconds?: number) => Promise<void>;
+  versionedKey: (tag: string, key: string) => Promise<string>;
+  withTelemetrySpan: <T>(
+    name: string,
+    options: { attributes?: TelemetrySpanAttributes; redactKeys?: string[] },
+    fn: (span: TelemetrySpan) => Promise<T> | T
+  ) => Promise<T>;
+};
+
+/**
+ * Context for the accommodations service.
+ *
+ * @property processPayment - Optional payment processing function for bookings.
+ * @property requestApproval - Optional approval request function for bookings.
+ */
+export type ServiceContext = ProviderContext & {
+  processPayment?: (params: {
+    amountCents: number;
+    currency: string;
+  }) => Promise<ProcessedPayment>;
+  requestApproval?: () => Promise<void>;
+};
+
+const CACHE_NAMESPACE = "service:accom:search";
+const BOOKING_CACHE_NAMESPACE = "service:accom:booking";
+const CACHE_TAG_SEARCH = "accommodations:search";
+const CACHE_TAG_BOOKING = "accommodations:booking";
+
+/** Cached booking price data structure. */
+type CachedBookingPrice = {
+  bookingToken: string;
+  price: { currency: string; total: string };
+  propertyId: string;
+  rateId: string;
+  sessionId?: string;
+  userId?: string;
+};
+
+/** Accommodations service class. */
+export class AccommodationsService {
+  constructor(private readonly deps: AccommodationsServiceDeps) {}
+
+  /** Executes an availability search with cache-aside. */
+  async search(
+    params: AccommodationSearchParams,
+    ctx?: ServiceContext
+  ): Promise<AccommodationSearchResult> {
+    return await this.deps.withTelemetrySpan(
+      "accommodations.search",
+      {
+        attributes: {
+          hasSemanticQuery: Boolean(params.semanticQuery?.trim()),
+        },
+        redactKeys: ["location", "semanticQuery"],
+      },
+      async (span) => {
+        const startedAt = Date.now();
+
+        const baseCacheKey = this.buildCacheKey(params);
+        if (baseCacheKey) {
+          const versionedCacheKey = await this.deps.versionedKey(
+            CACHE_TAG_SEARCH,
+            baseCacheKey
+          );
+          const cached =
+            await this.deps.getCachedJson<AccommodationSearchResult>(versionedCacheKey);
+          if (cached) {
+            span.addEvent("cache.hit", { key: versionedCacheKey });
+            return {
+              ...cached,
+              fromCache: true,
+            };
+          }
+          span.addEvent("cache.miss", { key: versionedCacheKey });
+        }
+
+        let coords: { lat: number; lon: number } | null = null;
+        try {
+          coords = await this.deps.resolveLocationToLatLng(params.location);
+        } catch (error) {
+          span.recordException(
+            error instanceof Error ? error : new Error("Unknown error")
+          );
+          coords = null;
+        }
+        if (!coords) {
+          throw new ProviderError("not_found", "location_not_found");
+        }
+
+        const enrichedParams = {
+          ...params,
+          lat: coords?.lat,
+          lng: coords?.lon,
+        };
+
+        const providerResult = await this.callProvider(
+          (providerCtx) => this.deps.provider.search(enrichedParams, providerCtx),
+          ctx
+        );
+
+        const filteredListings = filterListingsByPrice(
+          providerResult.value.listings,
+          params.priceMin,
+          params.priceMax
+        );
+
+        const prices = collectPrices(filteredListings);
+
+        const result = accommodationSearchOutputSchema.parse({
+          avgPrice:
+            prices.length > 0
+              ? prices.reduce((sum, value) => sum + value, 0) / prices.length
+              : undefined,
+          fromCache: false,
+          listings: filteredListings,
+          maxPrice: prices.length > 0 ? Math.max(...prices) : undefined,
+          minPrice: prices.length > 0 ? Math.min(...prices) : undefined,
+          provider: this.deps.provider.name,
+          resultsReturned: filteredListings.length,
+          searchId: secureUuid(),
+          searchParameters: {
+            checkin: params.checkin,
+            checkout: params.checkout,
+            guests: params.guests,
+            lat: coords.lat,
+            lng: coords.lon,
+            location: params.location,
+            semanticQuery: params.semanticQuery,
+          },
+          status: "success" as const,
+          tookMs: Date.now() - startedAt,
+          totalResults: filteredListings.length,
+        });
+
+        if (baseCacheKey) {
+          const versionedCacheKey = await this.deps.versionedKey(
+            CACHE_TAG_SEARCH,
+            baseCacheKey
+          );
+          await this.deps.setCachedJson(
+            versionedCacheKey,
+            result,
+            this.deps.cacheTtlSeconds
+          );
+        }
+        return result;
+      }
+    );
+  }
+
+  /** Retrieve details for a specific accommodation property. */
+  async details(
+    params: AccommodationDetailsParams,
+    ctx?: ServiceContext
+  ): Promise<AccommodationDetailsResult> {
+    return await this.deps.withTelemetrySpan(
+      "accommodations.details",
+      {
+        attributes: { listingId: params.listingId },
+        redactKeys: ["listingId"],
+      },
+      async (span) => {
+        const result = await this.callProvider(
+          (providerCtx) => this.deps.provider.getDetails(params, providerCtx),
+          ctx
+        );
+
+        const enriched = await this.deps.enrichHotelListingWithPlaces(
+          result.value.listing
+        );
+
+        span.addEvent("details.enriched", {
+          hasPlace: Boolean(enriched.place),
+        });
+
+        return accommodationDetailsOutputSchema.parse({
+          listing: enriched,
+          provider: this.deps.provider.name,
+          status: "success" as const,
+        });
+      }
+    );
+  }
+
+  /** Check final availability and pricing. */
+  async checkAvailability(
+    params: AccommodationCheckAvailabilityParams,
+    ctx: ServiceContext
+  ): Promise<AccommodationCheckAvailabilityResult> {
+    return await this.deps.withTelemetrySpan(
+      "accommodations.checkAvailability",
+      {
+        attributes: {
+          propertyId: params.propertyId,
+          rateId: params.rateId,
+          ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+          ...(ctx.userId ? { userId: ctx.userId } : {}),
+        },
+        redactKeys: ["userId", "sessionId"],
+      },
+      async (span) => {
+        const availability = await this.callProvider(
+          (providerCtx) => this.deps.provider.checkAvailability(params, providerCtx),
+          ctx
+        );
+
+        const bookingCacheKey = `${BOOKING_CACHE_NAMESPACE}:${availability.value.bookingToken}`;
+        const versionedBookingKey = await this.deps.versionedKey(
+          CACHE_TAG_BOOKING,
+          bookingCacheKey
+        );
+        const cachedPriceData: CachedBookingPrice = {
+          bookingToken: availability.value.bookingToken,
+          price: availability.value.price,
+          propertyId: availability.value.propertyId,
+          rateId: availability.value.rateId,
+          sessionId: ctx.sessionId,
+          userId: ctx.userId,
+        };
+        await this.deps.setCachedJson(versionedBookingKey, cachedPriceData, 10 * 60);
+
+        span.addEvent("availability.cached", {
+          bookingToken: availability.value.bookingToken,
+        });
+
+        return accommodationCheckAvailabilityOutputSchema.parse({
+          bookingToken: availability.value.bookingToken,
+          expiresAt: availability.value.expiresAt,
+          price: availability.value.price,
+          propertyId: availability.value.propertyId,
+          rateId: availability.value.rateId,
+          status: "success" as const,
+        });
+      }
+    );
+  }
+
+  /** Complete an accommodation booking. */
+  async book(
+    params: AccommodationBookingRequest,
+    ctx: ServiceContext & { userId: string }
+  ): Promise<AccommodationBookingResult> {
+    return await this.deps.withTelemetrySpan(
+      "accommodations.book",
+      {
+        attributes: {
+          listingId: params.listingId,
+          ...(ctx.sessionId ? { sessionId: ctx.sessionId } : {}),
+          ...(params.tripId ? { tripId: params.tripId } : {}),
+          ...(ctx.userId ? { userId: ctx.userId } : {}),
+        },
+        redactKeys: ["userId", "sessionId"],
+      },
+      async (span) => {
+        this.validateBookingContext(ctx, span, params.listingId);
+
+        await this.validateTripOwnership(params.tripId, ctx.userId);
+
+        const bookingCacheKey = `${BOOKING_CACHE_NAMESPACE}:${params.bookingToken}`;
+        const versionedBookingKey = await this.deps.versionedKey(
+          CACHE_TAG_BOOKING,
+          bookingCacheKey
+        );
+        const cachedPrice =
+          await this.deps.getCachedJson<CachedBookingPrice>(versionedBookingKey);
+
+        if (!cachedPrice) {
+          throw new Error("booking_price_not_cached");
+        }
+
+        const { amountCents, currency } = this.validateCachedPrice(
+          cachedPrice,
+          params,
+          ctx
+        );
+
+        const providerPayloadBuilder = (payment: ProcessedPayment) =>
+          this.deps.provider.buildBookingPayload(params, {
+            currency,
+            paymentIntentId: payment.paymentIntentId,
+            totalCents: amountCents,
+          });
+        const idempotencyKey = params.idempotencyKey ?? secureUuid();
+
+        const result = await runBookingOrchestrator(
+          { provider: this.deps.provider },
+          {
+            amount: amountCents,
+            approvalKey: "bookAccommodation",
+            bookingToken: params.bookingToken,
+            currency,
+            guest: {
+              email: params.guestEmail,
+              name: params.guestName,
+              phone: params.guestPhone,
+            },
+            idempotencyKey,
+            paymentMethodId: params.paymentMethodId,
+            persistBooking: async (payload) => {
+              const bookingRow = this.buildBookingRow(params, payload, ctx.userId);
+
+              const persist = async () => await this.deps.persistBooking(bookingRow);
+
+              const { error } = await this.deps.retryWithBackoff(persist, {
+                attempts: 3,
+                baseDelayMs: 200,
+                maxDelayMs: 1_000,
+              });
+              if (error) {
+                throw error;
+              }
+            },
+            processPayment: () => {
+              if (!ctx.processPayment) {
+                throw new Error("processPayment handler missing");
+              }
+              return ctx.processPayment({
+                amountCents,
+                currency,
+              });
+            },
+            providerPayload: providerPayloadBuilder,
+            requestApproval: () => {
+              if (!ctx.requestApproval) {
+                throw new Error("requestApproval handler missing");
+              }
+              return ctx.requestApproval();
+            },
+            sessionId: ctx.sessionId ?? secureUuid(),
+            stay: {
+              checkin: params.checkin,
+              checkout: params.checkout,
+              guests: params.guests,
+              listingId: params.listingId,
+              specialRequests: params.specialRequests,
+              tripId: params.tripId,
+            },
+            userId: ctx.userId,
+          }
+        );
+
+        span.addEvent("booking.persisted", {
+          listingId: params.listingId,
+          priceCents: amountCents,
+        });
+
+        // Invalidate search cache using tag-based invalidation
+        // Bumping the tag invalidates all search cache entries for this tag
+        await this.deps.bumpTag(CACHE_TAG_SEARCH);
+        span.addEvent("cache.invalidated", { tag: CACHE_TAG_SEARCH });
+
+        return accommodationBookingOutputSchema.parse(result);
+      }
+    );
+  }
+
+  /** Call a provider function and return the result. */
+  private async callProvider<T>(
+    fn: (ctx?: ProviderContext) => Promise<ProviderResult<T>>,
+    ctx?: ServiceContext
+  ): Promise<{ ok: true; value: T; retries: number }> {
+    const providerCtx: ProviderContext | undefined = ctx
+      ? {
+          clientIp: ctx.clientIp,
+          sessionId: ctx.sessionId ?? ctx.userId,
+          testScenario: ctx.testScenario,
+          userAgent: ctx.userAgent,
+          userId: ctx.userId,
+        }
+      : undefined;
+
+    const result = await fn(providerCtx);
+    if (!result.ok) {
+      throw result.error;
+    }
+    return result;
+  }
+
+  /** Build a cache key for a search parameters object. */
+  private buildCacheKey(params: AccommodationSearchParams): string | undefined {
+    return this.deps.canonicalizeParamsForCache(
+      {
+        ...params,
+        semanticQuery: params.semanticQuery || "",
+      },
+      CACHE_NAMESPACE
+    );
+  }
+
+  /**
+   * Validates booking context including payment/approval handlers.
+   *
+   * @param ctx - Service context with payment and approval handlers
+   * @param span - Telemetry span for event recording
+   * @throws Error if handlers are missing
+   */
+  private validateBookingContext(
+    ctx: ServiceContext & { userId: string },
+    span: TelemetrySpan,
+    listingId: string
+  ): void {
+    if (!ctx.processPayment || !ctx.requestApproval) {
+      throw new Error("booking context missing payment or approval handlers");
+    }
+    span.addEvent("booking.handlers_validated", { listingId });
+  }
+
+  /**
+   * Validates that a trip exists and belongs to the user.
+   *
+   * @param tripId - Trip ID string to validate
+   * @param userId - User ID to verify ownership
+   * @throws ProviderError if trip ID is invalid or trip not found/not owned
+   */
+  private async validateTripOwnership(
+    tripId: string | undefined,
+    userId: string
+  ): Promise<void> {
+    if (!tripId) return;
+
+    const parsedTripId = /^\d+$/.test(tripId)
+      ? Number.parseInt(tripId, 10)
+      : Number.NaN;
+    if (!Number.isFinite(parsedTripId)) {
+      throw new ProviderError("validation_failed", "invalid_trip_id");
+    }
+
+    const trip = await this.deps.getTripOwnership(parsedTripId, userId);
+
+    if (!trip) {
+      throw new ProviderError("not_found", "trip_not_found_or_not_owned");
+    }
+  }
+
+  /**
+   * Validates cached booking price and context.
+   *
+   * @param cachedPrice - Cached price data from booking cache (must not be null)
+   * @param params - Booking request parameters
+   * @param ctx - Service context with user/session info
+   * @returns Validated amount in cents
+   * @throws Error if validation fails
+   */
+  private validateCachedPrice(
+    cachedPrice: CachedBookingPrice,
+    params: AccommodationBookingRequest,
+    ctx: ServiceContext & { userId: string }
+  ): { amountCents: number; currency: string } {
+    if (cachedPrice.userId && cachedPrice.userId !== ctx.userId) {
+      throw new Error("booking_context_mismatch");
+    }
+    if (
+      cachedPrice.sessionId &&
+      ctx.sessionId &&
+      cachedPrice.sessionId !== ctx.sessionId
+    ) {
+      throw new Error("booking_context_mismatch");
+    }
+    if (cachedPrice.propertyId !== params.listingId) {
+      throw new Error("booking_price_mismatch");
+    }
+
+    const amountCents = Math.round(Number.parseFloat(cachedPrice.price.total) * 100);
+    if (!Number.isFinite(amountCents) || amountCents <= 0) {
+      throw new Error("booking_price_invalid");
+    }
+
+    return { amountCents, currency: cachedPrice.price.currency };
+  }
+
+  /**
+   * Builds a database row for booking persistence.
+   *
+   * @param params - Booking request parameters
+   * @param payload - Booking orchestrator payload with booking ID
+   * @param userId - User ID for the booking
+   * @returns Database row object ready for insertion
+   */
+  private buildBookingRow(
+    params: AccommodationBookingRequest,
+    payload: {
+      bookingId: string;
+      providerBookingId?: string;
+      stripePaymentIntentId?: string | null;
+    },
+    userId: string
+  ): AccommodationBookingInsert {
+    if (!params.bookingToken) {
+      throw new Error("bookingToken is required for booking persistence");
+    }
+
+    return {
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      booking_token: params.bookingToken,
+      checkin: params.checkin,
+      checkout: params.checkout,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      guest_email: params.guestEmail,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      guest_name: params.guestName,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      guest_phone: params.guestPhone ?? null,
+      guests: params.guests,
+      id: payload.bookingId,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      property_id: params.listingId,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      provider_booking_id: payload.providerBookingId ?? payload.bookingId,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      special_requests: params.specialRequests ?? null,
+      status: "CONFIRMED",
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      stripe_payment_intent_id: payload.stripePaymentIntentId ?? null,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      trip_id:
+        params.tripId !== undefined && /^\d+$/.test(params.tripId)
+          ? Number.parseInt(params.tripId, 10)
+          : null,
+      // biome-ignore lint/style/useNamingConvention: database columns use snake_case
+      user_id: userId,
+    } as const;
+  }
+}
+
+/** Internal type for price extraction from provider listings. */
+type ProviderListingWithPrices = {
+  rooms?: Array<{
+    rates?: Array<{
+      price?: {
+        numeric?: number;
+        total?: string;
+      };
+    }>;
+  }>;
+};
+
+/**
+ * Extracts numeric price values from accommodation listings.
+ *
+ * @param listings - Array of accommodation listing objects with nested rooms and rates.
+ * @returns Array of numeric price values found in the listings.
+ */
+function collectPrices(listings: Array<ProviderListingWithPrices>): number[] {
+  const values: number[] = [];
+  for (const listing of listings) {
+    if (!Array.isArray(listing.rooms)) continue;
+    for (const room of listing.rooms) {
+      if (!room || typeof room !== "object") continue;
+      if (!Array.isArray(room.rates)) continue;
+      for (const rate of room.rates) {
+        if (!rate || typeof rate !== "object") continue;
+        const price = rate.price;
+        const numeric =
+          typeof price?.numeric === "number"
+            ? price.numeric
+            : price?.total
+              ? Number.parseFloat(price.total)
+              : undefined;
+        if (typeof numeric === "number" && Number.isFinite(numeric)) {
+          values.push(numeric);
+        }
+      }
+    }
+  }
+  return values;
+}
+
+/**
+ * Filters listings to those whose price range overlaps with the provided bounds.
+ *
+ * @param listings - Unfiltered provider listings.
+ * @param minPrice - Optional minimum total price.
+ * @param maxPrice - Optional maximum total price.
+ * @returns Listings constrained to the requested price band.
+ */
+function filterListingsByPrice(
+  listings: Array<ProviderListingWithPrices>,
+  minPrice?: number,
+  maxPrice?: number
+): Array<ProviderListingWithPrices> {
+  if (minPrice === undefined && maxPrice === undefined) return listings;
+
+  return listings.filter((listing) => {
+    const prices = collectPrices([listing]);
+    if (prices.length === 0) return true;
+    const minListingPrice = Math.min(...prices);
+    const maxListingPrice = Math.max(...prices);
+    if (minPrice !== undefined && maxListingPrice < minPrice) return false;
+    if (maxPrice !== undefined && minListingPrice > maxPrice) return false;
+    return true;
+  });
+}

@@ -1,0 +1,201 @@
+/** @vitest-environment node */
+
+import type { NotifyJob } from "@schemas/webhooks";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { createMockNextRequest, getMockCookiesForTest } from "@/test/helpers/route";
+import { setupUpstashTestEnvironment } from "@/test/upstash/setup";
+
+const {
+  afterAllHook: upstashAfterAllHook,
+  beforeEachHook: upstashBeforeEachHook,
+  mocks: upstashMocks,
+} = setupUpstashTestEnvironment();
+type TryReserveKey = (key: string, ttlSecondsOrOptions?: unknown) => Promise<boolean>;
+type ReleaseKey = (key: string, options?: unknown) => Promise<boolean>;
+type SendNotifications = (
+  payload: NotifyJob["payload"],
+  eventKey: string
+) => Promise<{ emailed?: boolean; webhookPosted?: boolean }>;
+
+type RouteModule = typeof import("../route");
+
+// Mock next/headers cookies() BEFORE any imports that use it
+vi.mock("next/headers", () => ({
+  cookies: vi.fn(() =>
+    Promise.resolve(getMockCookiesForTest({ "sb-access-token": "test-token" }))
+  ),
+}));
+
+const envStore = vi.hoisted<Record<string, string | undefined>>(() => ({
+  QSTASH_CURRENT_SIGNING_KEY: "current",
+  QSTASH_NEXT_SIGNING_KEY: "next",
+  UPSTASH_REDIS_REST_TOKEN: "token",
+  UPSTASH_REDIS_REST_URL: "https://example.upstash.local",
+}));
+
+const tryReserveKeyMock = vi.hoisted(() => vi.fn<TryReserveKey>(async () => true));
+const releaseKeyMock = vi.hoisted(() => vi.fn<ReleaseKey>(async () => true));
+const sendNotificationsMock = vi.hoisted(() =>
+  vi.fn<SendNotifications>(async () => ({ emailed: true, webhookPosted: false }))
+);
+
+vi.mock("@/lib/env/server", () => ({
+  getServerEnvVar: (key: string) => {
+    const value = (envStore as Record<string, string | undefined>)[key];
+    if (!value) {
+      throw new Error(`Missing env ${key}`);
+    }
+    return value;
+  },
+  getServerEnvVarWithFallback: (key: string, fallback?: string) => {
+    const value = (envStore as Record<string, string | undefined>)[key];
+    return (value ?? fallback) as string;
+  },
+}));
+
+vi.mock("@/lib/idempotency/redis", () => ({
+  releaseKey: (key: string, options?: unknown) => releaseKeyMock(key, options),
+  tryReserveKey: (key: string, ttlSecondsOrOptions?: unknown) =>
+    tryReserveKeyMock(key, ttlSecondsOrOptions),
+}));
+
+vi.mock("@/lib/notifications/collaborators", () => ({
+  sendCollaboratorNotifications: (payload: NotifyJob["payload"], eventKey: string) =>
+    sendNotificationsMock(payload, eventKey),
+}));
+
+// Mock route helpers
+vi.mock("@/lib/api/route-helpers", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/route-helpers")>(
+    "@/lib/api/route-helpers"
+  );
+  return {
+    ...actual,
+    withRequestSpan: vi.fn(async (_name, _attrs, fn) => {
+      const span = {
+        recordException: vi.fn(),
+        setAttribute: vi.fn(),
+      };
+      try {
+        return await fn(span);
+      } catch (error) {
+        console.error("withRequestSpan error", error);
+        throw error;
+      }
+    }),
+  };
+});
+
+function makeRequest(
+  body: NotifyJob | Record<string, unknown>,
+  headers?: Record<string, string>
+) {
+  return createMockNextRequest({
+    body,
+    headers: {
+      "Upstash-Message-Id": "msg-1",
+      "Upstash-Signature": "sig",
+      ...headers,
+    },
+    method: "POST",
+    url: "http://localhost/api/jobs/notify-collaborators",
+  });
+}
+
+const validJob: NotifyJob = {
+  eventKey: "trip_collaborators:INSERT:1",
+  payload: {
+    occurredAt: "2025-11-13T03:00:00Z",
+    oldRecord: null,
+    record: { id: "abc", table: "trip_collaborators" } as Record<string, unknown>,
+    table: "trip_collaborators",
+    type: "INSERT",
+  },
+};
+
+describe("POST /api/jobs/notify-collaborators", () => {
+  beforeEach(() => {
+    upstashBeforeEachHook();
+    vi.clearAllMocks();
+    tryReserveKeyMock.mockReset();
+    releaseKeyMock.mockReset();
+    sendNotificationsMock.mockReset();
+    upstashMocks.qstash.__forceVerify(true);
+    tryReserveKeyMock.mockResolvedValue(true);
+    releaseKeyMock.mockResolvedValue(true);
+    envStore.QSTASH_CURRENT_SIGNING_KEY = "current";
+    envStore.QSTASH_NEXT_SIGNING_KEY = "next";
+  });
+
+  const loadRoute = async (): Promise<RouteModule> => {
+    return await import("../route");
+  };
+
+  it("returns 500 when signing keys are missing", async () => {
+    envStore.QSTASH_CURRENT_SIGNING_KEY = undefined;
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest(validJob));
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.error).toBe("configuration_error");
+    expect(json.reason).toBe("QStash signing keys are misconfigured");
+  });
+
+  it("returns 401 when signature verification fails", async () => {
+    upstashMocks.qstash.__forceVerify(false);
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest(validJob));
+    expect(res.status).toBe(401);
+    const json = await res.json();
+    // Signature verification returns standardized error format
+    expect(json.error).toBe("unauthorized");
+    expect(json.reason).toBe("Invalid Upstash signature");
+  });
+
+  it("returns 400 on invalid job payload", async () => {
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest({}));
+    expect(res.status).toBe(489);
+    const json = await res.json();
+    expect(json.error).toBe("invalid_request");
+    expect(json.reason).toBe("Request validation failed");
+    expect(res.headers.get("Upstash-NonRetryable-Error")).toBe("true");
+  });
+
+  it("marks duplicates when idempotency guard fails", async () => {
+    tryReserveKeyMock.mockResolvedValue(false);
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest(validJob));
+    const json = await res.json();
+    expect(res.status).toBe(200);
+    expect(json.duplicate).toBe(true);
+    expect(sendNotificationsMock).not.toHaveBeenCalled();
+  });
+
+  it("succeeds when payload and signature are valid", async () => {
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest(validJob));
+    const json = await res.json();
+    expect(res.status).toBe(200);
+    expect(json.ok).toBe(true);
+    expect(sendNotificationsMock).toHaveBeenCalledWith(
+      validJob.payload,
+      validJob.eventKey
+    );
+  });
+
+  it("releases the idempotency key when notification sending fails", async () => {
+    sendNotificationsMock.mockRejectedValueOnce(new Error("resend_down"));
+
+    const { POST } = await loadRoute();
+    const res = await POST(makeRequest(validJob));
+    expect(res.status).toBe(500);
+    expect(releaseKeyMock).toHaveBeenCalledWith(`notify:${validJob.eventKey}`, {
+      degradedMode: "fail_open",
+    });
+  });
+
+  afterAll(() => {
+    upstashAfterAllHook();
+  });
+});

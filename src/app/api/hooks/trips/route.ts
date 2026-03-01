@@ -1,0 +1,118 @@
+/**
+ * @fileoverview Trip collaborator webhook handler with async notification queuing.
+ */
+
+import "server-only";
+
+import { after } from "next/server";
+import { sendCollaboratorNotifications } from "@/lib/notifications/collaborators";
+import { tryEnqueueJob } from "@/lib/qstash/client";
+import { QSTASH_JOB_LABELS } from "@/lib/qstash/config";
+import { getAdminSupabase } from "@/lib/supabase/admin";
+import type { Database } from "@/lib/supabase/database.types";
+import { getMaybeSingle } from "@/lib/supabase/typed-helpers";
+import { createServerLogger } from "@/lib/telemetry/logger";
+import { recordErrorOnSpan, withTelemetrySpan } from "@/lib/telemetry/span";
+import { createWebhookHandler } from "@/lib/webhooks/handler";
+
+type TripCollaboratorRow = Database["public"]["Tables"]["trip_collaborators"]["Row"];
+
+const logger = createServerLogger("webhook.trips");
+
+/**
+ * Handles trip collaborator database change webhooks with async notification processing.
+ *
+ * Features (via handler abstraction):
+ * - Rate limiting (100 req/min per IP)
+ * - Body size validation (64KB max)
+ * - HMAC signature verification
+ * - Table filtering (trip_collaborators only)
+ * - Idempotency via Redis
+ */
+export const POST = createWebhookHandler({
+  enableIdempotency: true,
+
+  async handle(payload, eventKey, span) {
+    // Validate trip exists (optional integrity check)
+    const collaboratorRecord = (payload.record ??
+      payload.oldRecord) as Partial<TripCollaboratorRow> | null;
+    const tripIdValue = collaboratorRecord?.trip_id;
+    const tripId = typeof tripIdValue === "number" ? tripIdValue : undefined;
+
+    if (tripId) {
+      const supabase = getAdminSupabase();
+      const { data, error } = await getMaybeSingle(
+        supabase,
+        "trips",
+        (qb) => qb.eq("id", tripId),
+        { select: "id", validate: false }
+      );
+
+      if (error) {
+        const normalized = error instanceof Error ? error : new Error(String(error));
+        span.recordException(normalized);
+        throw normalized; // Will be caught by handler and return 500
+      }
+
+      if (!data) {
+        span.setAttribute("webhook.trip_not_found", true);
+        return { ok: true, reason: "trip_not_found", skipped: true };
+      }
+    }
+
+    // Primary path: enqueue to QStash worker for durable retries
+    const result = await tryEnqueueJob(
+      "notify-collaborators",
+      { eventKey, payload },
+      "/api/jobs/notify-collaborators",
+      {
+        deduplicationId: `notify:${eventKey}`,
+        label: QSTASH_JOB_LABELS.NOTIFY_COLLABORATORS,
+      }
+    );
+
+    if (result.success) {
+      span.setAttribute("qstash.message_id", result.messageId);
+      return { enqueued: true };
+    }
+
+    // Fallback: fire-and-forget via after() if QStash unavailable
+    after(async () => {
+      try {
+        await withTelemetrySpan(
+          "webhook.trips.fallback",
+          {
+            attributes: {
+              "event.key": eventKey,
+              fallback: true,
+              route: "/api/hooks/trips",
+            },
+          },
+          async (fallbackSpan) => {
+            try {
+              await sendCollaboratorNotifications(payload, eventKey);
+            } catch (err) {
+              const error = err instanceof Error ? err : new Error("unknown_error");
+              recordErrorOnSpan(fallbackSpan, error);
+              logger.error("fallback_failed", {
+                error: error.message,
+                eventKey,
+              });
+            }
+          }
+        );
+      } catch (err) {
+        // Swallow to avoid rethrowing inside after(); span already recorded the error
+        logger.error("fallback_failed", {
+          error: err instanceof Error ? err.message : "unknown_error",
+          eventKey,
+        });
+      }
+    });
+
+    return { enqueued: false, fallback: true };
+  },
+  idempotencyTTL: 300,
+  name: "trips",
+  tableFilter: "trip_collaborators",
+});

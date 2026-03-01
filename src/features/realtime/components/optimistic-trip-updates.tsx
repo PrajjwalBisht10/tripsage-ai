@@ -1,0 +1,666 @@
+/**
+ * @fileoverview Optimistic trip updates component for realtime collaboration UI.
+ */
+
+"use client";
+
+import type { UiTrip } from "@schemas/trips";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  AlertCircleIcon,
+  CalendarIcon,
+  CheckCircleIcon,
+  ClockIcon,
+  DollarSignIcon,
+  Loader2Icon,
+  MapPinIcon,
+  UsersIcon,
+} from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from "@/components/ui/use-toast";
+import { useCurrentUserId } from "@/hooks/use-current-user-id";
+import { type UpdateTripData, useTrip, useUpdateTrip } from "@/hooks/use-trips";
+import { keys } from "@/lib/keys";
+import type { TablesUpdate } from "@/lib/supabase/database.types";
+import { statusVariants } from "@/lib/variants/status";
+
+type TripUpdate = TablesUpdate<"trips">;
+type TripUpdateKey = keyof TripUpdate;
+
+/**
+ * Derive text/bg tone classes from the shared statusVariants map to avoid
+ * hardcoded palette drift. Parsing is scoped here to keep icon/dot styling
+ * lightweight while still anchored to the design tokens.
+ */
+function ToneClassFor(input: Parameters<typeof statusVariants>[0]) {
+  return statusVariants({ ...input, excludeRing: true });
+}
+
+function ExtractClass(classes: string, prefix: string) {
+  return classes.split(" ").find((cls) => cls.startsWith(prefix)) ?? "";
+}
+
+const STATUS_TONES = {
+  active: ToneClassFor({ status: "active" }),
+  error: ToneClassFor({ status: "error" }),
+  pending: ToneClassFor({ status: "pending" }),
+  success: ToneClassFor({ status: "success" }),
+} as const;
+
+const UPDATE_STATUS_COLORS = {
+  error: ExtractClass(STATUS_TONES.error, "text-"),
+  pending: ExtractClass(STATUS_TONES.pending, "text-"),
+  success: ExtractClass(STATUS_TONES.success, "text-"),
+} as const;
+
+const CONNECTION_BADGE_PROPS = {
+  active: {
+    className: statusVariants({ status: "active" }),
+    icon: CheckCircleIcon,
+    label: "Live updates enabled",
+  },
+  issues: {
+    className: statusVariants({ status: "pending" }),
+    icon: AlertCircleIcon,
+    label: "Connection issues detected",
+  },
+  offline: {
+    className: statusVariants({ status: "error" }),
+    icon: AlertCircleIcon,
+    label: "Offline - Changes will sync when reconnected",
+  },
+} as const;
+
+type ConnectionState = keyof typeof CONNECTION_BADGE_PROPS;
+
+function GetConnectionBadgeProps(state: ConnectionState) {
+  return CONNECTION_BADGE_PROPS[state];
+}
+
+/**
+ * Interface for the optimistic trip updates props.
+ */
+interface OptimisticTripUpdatesProps {
+  /** The ID of the trip to update. */
+  tripId: number;
+  /** Whether the current user can edit the trip. Defaults to true. */
+  canEdit?: boolean;
+  /** Optional callback to emit activity items to a shared feed. */
+  onActivity?: (input: { kind: "trip_updated"; message: string }) => void;
+}
+
+/**
+ * Component demonstrating optimistic updates for trip editing
+ * Shows real-time collaboration with instant UI feedback
+ */
+export function OptimisticTripUpdates({
+  tripId,
+  canEdit = true,
+  onActivity,
+}: OptimisticTripUpdatesProps) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const userId = useCurrentUserId();
+  const updateTrip = useUpdateTrip();
+  const {
+    data: fetchedTrip,
+    error: tripError,
+    isConnected,
+    isLoading,
+    realtimeStatus,
+  } = useTrip(tripId);
+
+  const [formData, setFormData] = useState<Partial<TripUpdate>>({});
+  // Snapshots to support rollback when mutation fails and cache is missing
+  const prevTripRef = useRef<UiTrip | null>(null);
+  const prevFormRef = useRef<Partial<TripUpdate> | null>(null);
+  const [optimisticUpdates, setOptimisticUpdates] = useState<
+    Record<
+      string,
+      {
+        value: TripUpdate[keyof TripUpdate];
+        status: "pending" | "success" | "error";
+        timestamp: Date;
+      }
+    >
+  >({});
+  const tripNameInputId = useId();
+  const destinationInputId = useId();
+  const budgetInputId = useId();
+  const travelersInputId = useId();
+
+  const [trip, setTrip] = useState<UiTrip | null>(null);
+
+  const fieldToUiKey: Partial<Record<TripUpdateKey, keyof UiTrip>> = {
+    budget: "budget",
+    destination: "destination",
+    end_date: "endDate",
+    name: "title",
+    start_date: "startDate",
+    travelers: "travelers",
+  };
+
+  useEffect(() => {
+    if (!fetchedTrip) return;
+
+    setTrip(fetchedTrip);
+
+    setFormData((prev) => {
+      const next = {
+        budget: fetchedTrip.budget,
+        destination: fetchedTrip.destination,
+        name: fetchedTrip.title,
+        travelers: fetchedTrip.travelers,
+      } as Partial<TripUpdate>;
+
+      const hasChanged =
+        prev.budget !== next.budget ||
+        prev.destination !== next.destination ||
+        prev.name !== next.name ||
+        prev.travelers !== next.travelers;
+
+      return hasChanged ? next : prev;
+    });
+  }, [fetchedTrip]);
+
+  /**
+   * Handle optimistic update.
+   *
+   * @param field - The field to update.
+   * @param value - The value to update the field to.
+   * @returns A promise that resolves to the optimistic update.
+   */
+  const handleOptimisticUpdate = async (
+    field: TripUpdateKey,
+    value: TripUpdate[TripUpdateKey]
+  ) => {
+    if (!canEdit) {
+      toast({
+        description: "You have view-only access to this trip.",
+        title: "Read-only",
+      });
+      return;
+    }
+
+    if (!trip) {
+      toast({
+        description: "Trip data is still loading. Please wait and try again.",
+        title: "Loading",
+      });
+      return;
+    }
+
+    const updateKey = String(field);
+
+    // Snapshot current state for rollback
+    prevTripRef.current = trip;
+    prevFormRef.current = formData;
+
+    // Apply optimistic update to local state
+    setOptimisticUpdates((prev) => ({
+      ...prev,
+      [updateKey]: {
+        status: "pending",
+        timestamp: new Date(),
+        value,
+      },
+    }));
+
+    // Update local trip state optimistically
+    setTrip((prev) => {
+      if (!prev) return prev;
+      const uiKey = fieldToUiKey[field];
+      if (!uiKey) {
+        if (process.env.NODE_ENV === "development") {
+          console.warn("Unmapped trip update field", {
+            field,
+            tripId,
+            value,
+          });
+        }
+        return prev;
+      }
+      return {
+        ...prev,
+        [uiKey]: value as UiTrip[keyof UiTrip],
+        updatedAt: new Date().toISOString(),
+      };
+    });
+
+    try {
+      // Perform actual update
+      const updates = { [field]: value } as UpdateTripData;
+
+      await updateTrip.mutateAsync({
+        data: updates,
+        tripId,
+      });
+
+      // Mark as successful and clear snapshots
+      setOptimisticUpdates((prev) => ({
+        ...prev,
+        [updateKey]: {
+          ...prev[updateKey],
+          status: "success",
+        },
+      }));
+      prevTripRef.current = null;
+      prevFormRef.current = null;
+
+      // Clear the optimistic update after a delay
+      setTimeout(() => {
+        setOptimisticUpdates((prev) => {
+          const { [updateKey]: _removed, ...rest } = prev;
+          return rest;
+        });
+      }, 2000);
+
+      onActivity?.({
+        kind: "trip_updated",
+        message: `Updated ${field.replaceAll("_", " ")}`,
+      });
+
+      /**
+       * Show a success toast.
+       */
+      toast({
+        description: `Trip ${field} has been updated successfully.`,
+        title: "Updated",
+      });
+    } catch (_error) {
+      // Revert optimistic update on error using cache or snapshots
+      const currentTrip = userId
+        ? queryClient.getQueryData<UiTrip | null>(keys.trips.detail(userId, tripId))
+        : null;
+      if (currentTrip) {
+        setTrip(currentTrip);
+        setFormData({
+          budget: currentTrip.budget,
+          destination: currentTrip.destination,
+          name: currentTrip.title,
+          travelers: currentTrip.travelers,
+        });
+      } else {
+        if (prevTripRef.current) setTrip(prevTripRef.current);
+        if (prevFormRef.current) setFormData(prevFormRef.current);
+      }
+
+      /**
+       * Set the optimistic update to error.
+       */
+      setOptimisticUpdates((prev) => ({
+        ...prev,
+        [updateKey]: {
+          ...prev[updateKey],
+          status: "error",
+        },
+      }));
+
+      /**
+       * Show a failure toast.
+       */
+      toast({
+        description: `Failed to update trip ${field}. Please try again.`,
+        title: "Update Failed",
+        variant: "destructive",
+      });
+    }
+  };
+
+  /**
+   * Handle input change.
+   *
+   * @param field - The field to update.
+   * @param value - The value to update the field to.
+   * @returns A promise that resolves to the input change.
+   */
+  const handleInputChange = (
+    field: TripUpdateKey,
+    value: TripUpdate[TripUpdateKey]
+  ) => {
+    setFormData((prev) => ({ ...prev, [field]: value }));
+  };
+
+  /**
+   * Handle input blur.
+   *
+   * @param field - The field to update.
+   * @returns A promise that resolves to the input blur.
+   */
+  const handleInputBlur = (field: keyof TripUpdate) => {
+    if (!canEdit) return;
+    const value = formData[field];
+    const uiKey = fieldToUiKey[field];
+    const currentValue = uiKey && trip ? trip[uiKey] : undefined;
+    if (value !== currentValue) {
+      handleOptimisticUpdate(field, value);
+    }
+  };
+
+  /**
+   * Get the field status.
+   *
+   * @param field - The field to get the status of.
+   * @returns The field status.
+   */
+  const getFieldStatus = (field: string) => {
+    const update = optimisticUpdates[field];
+    if (!update) return null;
+
+    switch (update.status) {
+      case "pending":
+        return (
+          <Loader2Icon
+            aria-hidden="true"
+            className={`h-4 w-4 animate-spin ${UPDATE_STATUS_COLORS.pending}`}
+          />
+        );
+      case "success":
+        return (
+          <CheckCircleIcon
+            aria-hidden="true"
+            className={`h-4 w-4 ${UPDATE_STATUS_COLORS.success}`}
+          />
+        );
+      case "error":
+        return (
+          <AlertCircleIcon
+            aria-hidden="true"
+            className={`h-4 w-4 ${UPDATE_STATUS_COLORS.error}`}
+          />
+        );
+    }
+  };
+
+  /**
+   * Get the connection status.
+   *
+   * @returns The connection status.
+   */
+  const getConnectionStatus = () => {
+    const realtimeErrors = realtimeStatus?.errors ?? [];
+    const state: ConnectionState = isConnected
+      ? realtimeErrors.length > 0
+        ? "issues"
+        : "active"
+      : "offline";
+
+    const { className, icon: Icon, label } = GetConnectionBadgeProps(state);
+
+    return (
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <Badge className={className}>
+          <Icon aria-hidden="true" className="h-3 w-3 mr-1" />
+          {label}
+        </Badge>
+        {!canEdit && (
+          <Badge variant="secondary" className="border border-dashed">
+            View only
+          </Badge>
+        )}
+      </div>
+    );
+  };
+
+  /**
+   * Render the optimistic trip updates component.
+   *
+   * @returns The optimistic trip updates component.
+   */
+  if (tripError) {
+    return (
+      <div className="space-y-4">
+        {getConnectionStatus()}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2 text-destructive">
+              <AlertCircleIcon aria-hidden="true" className="h-5 w-5" />
+              <span>Unable to load trip</span>
+            </CardTitle>
+            <CardDescription>
+              {tripError.message ?? "Please try again later."}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    );
+  }
+
+  if (isLoading && !trip) {
+    return (
+      <div className="space-y-4">
+        {getConnectionStatus()}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2">
+              <Loader2Icon aria-hidden="true" className="h-5 w-5 animate-spin" />
+              <span>Loading trip…</span>
+            </CardTitle>
+            <CardDescription>
+              Fetching the latest trip details and real-time connection status.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!trip) {
+    return (
+      <div className="space-y-4">
+        {getConnectionStatus()}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center space-x-2">
+              <AlertCircleIcon aria-hidden="true" className="h-5 w-5" />
+              <span>No trip found</span>
+            </CardTitle>
+            <CardDescription>
+              The requested trip could not be found. Please verify the trip ID.
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {getConnectionStatus()}
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <MapPinIcon aria-hidden="true" className="h-5 w-5" />
+            <span>Trip Details</span>
+          </CardTitle>
+          <CardDescription>
+            Edit your trip details. Changes are saved automatically and shared with
+            collaborators in real-time.
+          </CardDescription>
+        </CardHeader>
+
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="space-y-2">
+              <Label htmlFor={tripNameInputId} className="flex items-center space-x-2">
+                <span>Trip Name</span>
+                {getFieldStatus("name")}
+              </Label>
+              <Input
+                id={tripNameInputId}
+                value={formData.name || ""}
+                onChange={(e) => handleInputChange("name", e.target.value)}
+                onBlur={() => handleInputBlur("name")}
+                disabled={!canEdit}
+                placeholder="Enter trip name…"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label
+                htmlFor={destinationInputId}
+                className="flex items-center space-x-2"
+              >
+                <span>Destination</span>
+                {getFieldStatus("destination")}
+              </Label>
+              <Input
+                id={destinationInputId}
+                value={formData.destination || ""}
+                onChange={(e) => handleInputChange("destination", e.target.value)}
+                onBlur={() => handleInputBlur("destination")}
+                disabled={!canEdit}
+                placeholder="Enter destination…"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor={budgetInputId} className="flex items-center space-x-2">
+                <DollarSignIcon aria-hidden="true" className="h-4 w-4" />
+                <span>Budget</span>
+                {getFieldStatus("budget")}
+              </Label>
+              <Input
+                id={budgetInputId}
+                type="number"
+                value={formData.budget || 0}
+                onChange={(e) =>
+                  handleInputChange("budget", Number.parseInt(e.target.value, 10))
+                }
+                onBlur={() => handleInputBlur("budget")}
+                disabled={!canEdit}
+                placeholder="Enter budget…"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor={travelersInputId} className="flex items-center space-x-2">
+                <UsersIcon aria-hidden="true" className="h-4 w-4" />
+                <span>Travelers</span>
+                {getFieldStatus("travelers")}
+              </Label>
+              <Input
+                id={travelersInputId}
+                type="number"
+                min="1"
+                value={formData.travelers || 1}
+                onChange={(e) =>
+                  handleInputChange("travelers", Number.parseInt(e.target.value, 10))
+                }
+                onBlur={() => handleInputBlur("travelers")}
+                disabled={!canEdit}
+                placeholder="Number of travelers…"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label className="flex items-center space-x-2">
+              <CalendarIcon aria-hidden="true" className="h-4 w-4" />
+              <span>Trip Dates</span>
+            </Label>
+            <div className="grid grid-cols-2 gap-4">
+              <Input
+                type="date"
+                value={trip.startDate ?? ""}
+                onChange={(e) => handleOptimisticUpdate("start_date", e.target.value)}
+              />
+              <Input
+                type="date"
+                value={trip.endDate ?? ""}
+                onChange={(e) => handleOptimisticUpdate("end_date", e.target.value)}
+              />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Recent Activity Feed */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center space-x-2">
+            <ClockIcon aria-hidden="true" className="h-5 w-5" />
+            <span>Recent Updates</span>
+          </CardTitle>
+        </CardHeader>
+
+        <CardContent>
+          <div className="space-y-3">
+            {Object.entries(optimisticUpdates).map(([field, update]) => (
+              <div
+                key={field}
+                className="flex items-center justify-between p-3 rounded-lg bg-muted/50"
+              >
+                <div className="flex items-center space-x-3">
+                  {getFieldStatus(field)}
+                  <div>
+                    <div className="text-sm font-medium">
+                      Updated {field.replace("_", " ")}
+                    </div>
+                    <div className="text-xs text-muted-foreground">
+                      {update.timestamp.toLocaleTimeString()}
+                    </div>
+                  </div>
+                </div>
+                <Badge
+                  variant={
+                    update.status === "success"
+                      ? "default"
+                      : update.status === "error"
+                        ? "destructive"
+                        : "secondary"
+                  }
+                >
+                  {update.status}
+                </Badge>
+              </div>
+            ))}
+
+            {Object.keys(optimisticUpdates).length === 0 && (
+              <div className="text-center text-muted-foreground py-6">
+                No recent updates. Make changes to see real-time sync in action!
+              </div>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/**
+ * Collaboration indicator showing who else is currently editing
+ *
+ * @param tripId - The ID of the trip to show the collaborators for.
+ * @returns The collaboration indicator component.
+ */
+export function CollaborationIndicator({ tripId: _tripId }: { tripId: number }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center space-x-2">
+          <UsersIcon aria-hidden="true" className="h-5 w-5" />
+          <span>Active Collaborators</span>
+          <Badge variant="secondary">Coming soon</Badge>
+        </CardTitle>
+      </CardHeader>
+
+      <CardContent>
+        <p className="text-sm text-muted-foreground">
+          Presence indicators are coming soon.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}

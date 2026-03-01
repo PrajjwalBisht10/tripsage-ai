@@ -1,0 +1,337 @@
+/** @vitest-environment node */
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEST_USER_ID } from "@/test/helpers/ids";
+import {
+  createMockNextRequest,
+  createRouteParamsContext,
+  getMockCookiesForTest,
+} from "@/test/helpers/route";
+import { setupUpstashTestEnvironment } from "@/test/upstash/setup";
+
+const {
+  afterAllHook: upstashAfterAllHook,
+  beforeEachHook: upstashBeforeEachHook,
+  mocks: upstashMocks,
+} = setupUpstashTestEnvironment();
+
+vi.mock("next/headers", () => ({
+  cookies: vi.fn(() =>
+    Promise.resolve(getMockCookiesForTest({ "sb-access-token": "test-token" }))
+  ),
+}));
+
+const MOCK_SUPABASE = vi.hoisted(() => ({
+  auth: {
+    getUser: vi.fn(),
+  },
+}));
+
+const CREATE_SUPABASE = vi.hoisted(() => vi.fn(async () => MOCK_SUPABASE));
+const GET_CURRENT_USER = vi.hoisted(() =>
+  vi.fn(async () => ({
+    error: null,
+    user: { id: TEST_USER_ID } as never,
+  }))
+);
+
+const MOCK_GET_REDIS = vi.hoisted(() => vi.fn(() => undefined));
+
+const MOCK_ACTIVITIES_SEARCH = vi.hoisted(() => vi.fn());
+const MOCK_ACTIVITIES_DETAILS = vi.hoisted(() => vi.fn());
+class MockActivitiesService {
+  details = MOCK_ACTIVITIES_DETAILS;
+  search = MOCK_ACTIVITIES_SEARCH;
+}
+
+vi.mock("@/lib/redis", () => ({
+  getRedis: MOCK_GET_REDIS,
+}));
+
+vi.mock("@/lib/supabase/server", () => ({
+  createServerSupabase: CREATE_SUPABASE,
+  getCurrentUser: GET_CURRENT_USER,
+}));
+
+vi.mock("@domain/activities/service", () => ({
+  ActivitiesService: MockActivitiesService,
+}));
+
+vi.mock("@/lib/telemetry/span", () => ({
+  recordTelemetryEvent: vi.fn(),
+  sanitizeAttributes: vi.fn((attrs) => attrs),
+  withRequestSpan: vi.fn((_name, _attrs, fn) => fn()),
+}));
+
+vi.mock("@/lib/api/route-helpers", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/route-helpers")>(
+    "@/lib/api/route-helpers"
+  );
+  return {
+    ...actual,
+    getTrustedRateLimitIdentifier: vi.fn(() => `user:${TEST_USER_ID}`),
+    withRequestSpan: vi.fn((_name, _attrs, fn) => fn()),
+  };
+});
+
+describe("/api/activities routes", () => {
+  beforeEach(() => {
+    upstashBeforeEachHook();
+    upstashMocks.ratelimit.__force({
+      limit: 20,
+      remaining: 10,
+      reset: Date.now() + 60_000,
+      success: true,
+    });
+    MOCK_GET_REDIS.mockReset();
+    // Provide a Redis instance so rate limiting can execute via the Upstash mocks.
+    MOCK_GET_REDIS.mockReturnValue({} as never);
+    CREATE_SUPABASE.mockResolvedValue(MOCK_SUPABASE);
+    MOCK_SUPABASE.auth.getUser.mockResolvedValue({
+      data: { user: { id: TEST_USER_ID } },
+      error: null,
+    });
+  });
+
+  afterEach(async () => {
+    const { setRateLimitFactoryForTests } = await import("@/lib/api/factory");
+    setRateLimitFactoryForTests(null);
+    vi.clearAllMocks();
+  });
+
+  describe("POST /api/activities/search", () => {
+    it("should return activities on successful search", async () => {
+      const mockResult = {
+        activities: [
+          {
+            date: "2025-01-01",
+            description: "Test",
+            duration: 120,
+            id: "places/1",
+            location: "Test Location",
+            name: "Test Activity",
+            price: 2,
+            rating: 4.5,
+            type: "museum",
+          },
+        ],
+        metadata: {
+          cached: false,
+          primarySource: "googleplaces" as const,
+          sources: ["googleplaces" as const],
+          total: 1,
+        },
+      };
+
+      MOCK_ACTIVITIES_SEARCH.mockResolvedValue(mockResult);
+
+      const { POST } = await import("../search/route");
+      const req = createMockNextRequest({
+        body: { category: "museums", destination: "Paris" },
+        method: "POST",
+        url: "http://localhost/api/activities/search",
+      });
+
+      const res = await POST(req, createRouteParamsContext({}));
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.activities).toHaveLength(1);
+      expect(body.activities[0].name).toBe("Test Activity");
+      expect(MOCK_ACTIVITIES_SEARCH).toHaveBeenCalledWith(
+        { category: "museums", destination: "Paris" },
+        expect.objectContaining({ userId: TEST_USER_ID })
+      );
+    });
+
+    it("should validate request body schema", async () => {
+      const { POST } = await import("../search/route");
+      // Use invalid data that violates schema constraints (e.g., negative numbers)
+      const req = createMockNextRequest({
+        body: { adults: -1, children: -5 },
+        method: "POST",
+        url: "http://localhost/api/activities/search",
+      });
+
+      const res = await POST(req, createRouteParamsContext({}));
+      const body = await res.json();
+
+      // Schema validation happens in the factory, should return 400
+      expect(res.status).toBe(400);
+      expect(body.error).toBe("invalid_request");
+      expect(body.reason).toBeDefined();
+    });
+
+    it("should handle service errors", async () => {
+      MOCK_ACTIVITIES_SEARCH.mockRejectedValue(new Error("Service error"));
+
+      const { POST } = await import("../search/route");
+      const req = createMockNextRequest({
+        body: { destination: "Paris" },
+        method: "POST",
+        url: "http://localhost/api/activities/search",
+      });
+
+      const res = await POST(req, createRouteParamsContext({}));
+      const body = await res.json();
+
+      expect(res.status).toBe(500);
+      expect(body.error).toBe("internal");
+    });
+
+    it("should enforce rate limiting", async () => {
+      // Clear the global rate limit factory to use Upstash mocks instead
+      const { setRateLimitFactoryForTests } = await import("@/lib/api/factory");
+      setRateLimitFactoryForTests(null);
+
+      upstashMocks.ratelimit.__force({
+        limit: 20,
+        remaining: 0,
+        reset: Date.now() + 60000,
+        success: false,
+      });
+
+      // Need Redis available for rate limiting to work
+      MOCK_GET_REDIS.mockReturnValue({} as never);
+
+      const { POST } = await import("../search/route");
+      const req = createMockNextRequest({
+        body: { destination: "Paris" },
+        method: "POST",
+        url: "http://localhost/api/activities/search",
+      });
+
+      const res = await POST(req, createRouteParamsContext({}));
+
+      expect(res.status).toBe(429);
+      expect(upstashMocks.ratelimit.__getRecordedIdentifiers().length).toBeGreaterThan(
+        0
+      );
+    });
+  });
+
+  describe("GET /api/activities/[id]", () => {
+    it("should return activity details", async () => {
+      const mockActivity = {
+        date: "2025-01-01",
+        description: "Test",
+        duration: 120,
+        id: "places/123",
+        location: "Test Location",
+        name: "Test Activity",
+        price: 2,
+        rating: 4.5,
+        type: "museum",
+      };
+
+      MOCK_ACTIVITIES_DETAILS.mockResolvedValue(mockActivity);
+
+      const { GET } = await import("../[id]/route");
+      const req = createMockNextRequest({
+        cookies: { "sb-access-token": "test-token" },
+        method: "GET",
+        url: "http://localhost/api/activities/places/123",
+      });
+
+      const routeContext = createRouteParamsContext({ id: "places/123" });
+
+      const res = await GET(req, routeContext);
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.id).toBe("places/123");
+      expect(body.name).toBe("Test Activity");
+      expect(MOCK_ACTIVITIES_DETAILS).toHaveBeenCalledWith(
+        "places/123",
+        expect.objectContaining({ userId: TEST_USER_ID })
+      );
+    });
+
+    it("uses Supabase SSR auth-token cookie for personalization", async () => {
+      const mockActivity = {
+        date: "2025-01-01",
+        description: "Test",
+        duration: 120,
+        id: "places/123",
+        location: "Test Location",
+        name: "Test Activity",
+        price: 2,
+        rating: 4.5,
+        type: "museum",
+      };
+
+      MOCK_ACTIVITIES_DETAILS.mockResolvedValue(mockActivity);
+
+      const { GET } = await import("../[id]/route");
+      const req = createMockNextRequest({
+        cookies: { "sb-127-auth-token": "test-auth-token" },
+        method: "GET",
+        url: "http://localhost/api/activities/places/123",
+      });
+
+      const routeContext = createRouteParamsContext({ id: "places/123" });
+
+      const res = await GET(req, routeContext);
+      expect(res.status).toBe(200);
+      expect(MOCK_ACTIVITIES_DETAILS).toHaveBeenCalledWith(
+        "places/123",
+        expect.objectContaining({ userId: TEST_USER_ID })
+      );
+    });
+
+    it("should return 400 for missing place ID", async () => {
+      const { GET } = await import("../[id]/route");
+      const req = createMockNextRequest({
+        method: "GET",
+        url: "http://localhost/api/activities/",
+      });
+
+      const routeContext = createRouteParamsContext({});
+
+      const res = await GET(req, routeContext);
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe("invalid_request");
+    });
+
+    it("should return 404 when activity not found", async () => {
+      MOCK_ACTIVITIES_DETAILS.mockRejectedValue(
+        new Error("Activity not found for Place ID: invalid")
+      );
+
+      const { GET } = await import("../[id]/route");
+      const req = createMockNextRequest({
+        method: "GET",
+        url: "http://localhost/api/activities/invalid",
+      });
+
+      const routeContext = createRouteParamsContext({ id: "invalid" });
+
+      const res = await GET(req, routeContext);
+      const body = await res.json();
+
+      expect(res.status).toBe(404);
+      expect(body.error).toBe("not_found");
+    });
+
+    it("should validate place ID format", async () => {
+      const { GET } = await import("../[id]/route");
+      const req = createMockNextRequest({
+        method: "GET",
+        url: "http://localhost/api/activities/",
+      });
+
+      const routeContext = createRouteParamsContext({ id: "" });
+
+      const res = await GET(req, routeContext);
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.error).toBe("invalid_request");
+    });
+  });
+
+  afterAll(() => {
+    upstashAfterAllHook();
+  });
+});

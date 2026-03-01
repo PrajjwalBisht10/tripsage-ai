@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+
+  # OpenTelemetry Collector for monitoring
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib@sha256:213886eb6407af91b87fa47551c3632be1a6419ff3a5114ef1e6fc364628496f
+    container_name: tripsage-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./docker/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"     # OTLP gRPC receiver
+      - "4318:4318"     # OTLP HTTP receiver
+      - "8888:8888"     # Collector self-metrics
+    restart: unless-stopped
+    networks:
+      - tripsage-network
+    depends_on:
+      - jaeger
+
+  # Jaeger for distributed tracing
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: tripsage-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # Jaeger collector
+      - "14250:14250"   # Jaeger gRPC
+    restart: unless-stopped
+    networks:
+      - tripsage-network
+
+networks:
+  tripsage-network:
+    driver: bridge
+    name: tripsage-infrastructure

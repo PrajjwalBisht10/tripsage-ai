@@ -1,0 +1,404 @@
+/**
+ * @fileoverview Query error boundary with OTEL-backed telemetry. Refer to docs/development/backend/observability.md for tracing and alerting standards.
+ */
+
+"use client";
+
+import { useQueryErrorResetBoundary } from "@tanstack/react-query";
+import { AlertTriangleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
+import Link from "next/link";
+import type { ComponentType, ErrorInfo, JSX, ReactNode } from "react";
+import { useRef } from "react";
+import { ErrorBoundary, type FallbackProps } from "react-error-boundary";
+import { Button } from "@/components/ui/button";
+import { getErrorMessage, handleApiError } from "@/lib/api/error-types";
+import { normalizeThrownError } from "@/lib/client/normalize-thrown-error";
+import { getSessionId } from "@/lib/client/session";
+import { errorService } from "@/lib/error-service";
+import { cn, fireAndForget } from "@/lib/utils";
+
+type ErrorVariant = "network" | "server" | "auth" | "permission" | "default";
+
+/** Metadata extracted from an error for categorization and display. */
+interface ErrorMeta {
+  variant: ErrorVariant;
+  isRetryable: boolean;
+  statusCode?: number;
+  errorCode?: string;
+}
+
+/**
+ * Props for the error fallback component.
+ *
+ * @param meta - Error metadata including variant and retryability.
+ * @param onRetry - Callback to retry the failed operation.
+ */
+interface QueryErrorFallbackProps extends FallbackProps {
+  meta: ErrorMeta;
+  onRetry: () => void;
+  loginHref?: string;
+}
+
+/**
+ * Optional async error handler that may be invoked when errors occur.
+ *
+ * @param error - The error that was caught.
+ * @param info - React error info including component stack.
+ * @param meta - Resolved error metadata.
+ * @returns Promise or void - failures are swallowed to prevent boundary loops.
+ */
+type OptionalAsyncHandler = (
+  error: unknown,
+  info?: ErrorInfo,
+  meta?: ErrorMeta
+) => void | Promise<void>;
+
+const COMPONENT_CONTEXT = "QueryErrorBoundary" as const;
+
+/**
+ * Safely invokes an optional async handler, swallowing any errors to prevent
+ * recursive boundary failures.
+ *
+ * @param handler - Optional handler to invoke; no-op if undefined.
+ * @param error - Error to pass to the handler.
+ * @param info - React error info to pass to the handler.
+ * @param meta - Error metadata to pass to the handler.
+ */
+function SafeInvoke(
+  handler: OptionalAsyncHandler | undefined,
+  error: unknown,
+  info: ErrorInfo | undefined,
+  meta: ErrorMeta
+) {
+  if (!handler) return;
+
+  queueMicrotask(() => {
+    try {
+      const result = handler(error, info, meta);
+      Promise.resolve(result).catch(() => {
+        // Swallow handler failures to avoid error boundary loops
+      });
+    } catch {
+      // Swallow handler errors to avoid recursive boundary failures
+    }
+  });
+}
+
+/**
+ * Resolves error metadata by normalizing the error and categorizing its variant.
+ *
+ * @param error - Unknown error value to analyze.
+ * @returns Error metadata with variant, retryability, and status/error codes.
+ */
+function ResolveMeta(error: unknown): ErrorMeta {
+  const normalized = handleApiError(error);
+
+  // Use code-based checks since handleApiError always returns ApiError
+  const variant: ErrorVariant = (() => {
+    if (normalized.code === "NETWORK_ERROR") return "network";
+    if (normalized.status >= 500) return "server";
+    if (normalized.status === 401) return "auth";
+    if (normalized.status === 403) return "permission";
+    return "default";
+  })();
+
+  return {
+    errorCode: normalized.code,
+    isRetryable: normalized.shouldRetry,
+    statusCode: normalized.status,
+    variant,
+  };
+}
+
+/**
+ * Records error telemetry to the active OTEL span.
+ * Failures are swallowed to ensure telemetry never breaks the UI.
+ *
+ * @param error - The error to record.
+ * @param info - React error info including component stack.
+ * @param meta - Resolved error metadata.
+ */
+function RecordTelemetry(error: Error, info: ErrorInfo, meta: ErrorMeta) {
+  try {
+    const errorReport = errorService.createErrorReport(
+      error,
+      info.componentStack ? { componentStack: info.componentStack } : undefined,
+      { sessionId: getSessionId() }
+    );
+
+    fireAndForget(
+      errorService.reportError(errorReport, {
+        action: "render",
+        componentStack: info.componentStack,
+        context: COMPONENT_CONTEXT,
+        errorCode: meta.errorCode,
+        retryable: meta.isRetryable,
+        statusCode: meta.statusCode,
+        variant: meta.variant,
+      })
+    );
+  } catch {
+    // Telemetry failures must never break the UI
+  }
+}
+
+const VARIANT_STYLES: Record<ErrorVariant, string> = {
+  auth: "border-warning/20 bg-warning/10 text-warning",
+  default: "border-border bg-muted text-foreground",
+  network: "border-warning/20 bg-warning/10 text-warning",
+  permission: "border-destructive/20 bg-destructive/10 text-destructive",
+  server: "border-destructive/20 bg-destructive/10 text-destructive",
+};
+
+const VARIANT_DISPLAY: Record<
+  ErrorVariant,
+  { icon: JSX.Element; message: string; title: string }
+> = {
+  auth: {
+    icon: <AlertTriangleIcon aria-hidden="true" className="h-8 w-8 text-warning" />,
+    message: "Please log in to continue.",
+    title: "Authentication Required",
+  },
+  default: {
+    icon: <AlertTriangleIcon aria-hidden="true" className="h-8 w-8 text-destructive" />,
+    message: "Something went wrong. Please try again.",
+    title: "Something went wrong",
+  },
+  network: {
+    icon: <WifiOffIcon aria-hidden="true" className="h-8 w-8 text-warning" />,
+    message: "Please check your internet connection and try again.",
+    title: "Connection Error",
+  },
+  permission: {
+    icon: <AlertTriangleIcon aria-hidden="true" className="h-8 w-8 text-destructive" />,
+    message: "You don't have permission to access this resource.",
+    title: "Access Denied",
+  },
+  server: {
+    icon: <AlertTriangleIcon aria-hidden="true" className="h-8 w-8 text-destructive" />,
+    message: "Our servers are experiencing issues. Please try again later.",
+    title: "Server Error",
+  },
+};
+
+/**
+ * Default fallback component that renders error UI based on error variant.
+ * Displays variant-specific icons, messages, and retry/login actions.
+ *
+ * @param error - The error that triggered the boundary.
+ * @param meta - Resolved error metadata.
+ * @param onRetry - Callback to retry the failed operation.
+ * @returns Rendered error UI component.
+ */
+function QueryErrorFallback({
+  error,
+  meta,
+  onRetry,
+  loginHref,
+}: QueryErrorFallbackProps) {
+  const normalized = normalizeThrownError(error);
+  const errorMessage = getErrorMessage(normalized);
+  const display = VARIANT_DISPLAY[meta.variant];
+  const showLogin = meta.variant === "auth";
+  const message = meta.variant === "default" ? errorMessage : display.message;
+  const resolvedLoginHref = loginHref ?? "/login";
+  const isInternalLoginHref =
+    resolvedLoginHref.startsWith("/") && !resolvedLoginHref.startsWith("//");
+
+  return (
+    <div
+      className={cn("rounded-lg border p-6", VARIANT_STYLES[meta.variant])}
+      data-error-variant={meta.variant}
+      data-error-retryable={meta.isRetryable}
+    >
+      <div className="mb-4 flex items-center gap-3">
+        {display.icon}
+        <h3 className="text-lg font-semibold">{display.title}</h3>
+      </div>
+
+      <p className="mb-4 text-sm opacity-90">{message}</p>
+
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          onClick={onRetry}
+          variant="outline"
+          size="sm"
+          className="flex items-center gap-2"
+          disabled={!meta.isRetryable}
+          aria-label="Try Again"
+        >
+          <RefreshCwIcon aria-hidden="true" className="h-4 w-4" />
+          Try Again
+        </Button>
+
+        {showLogin && (
+          <Button asChild size="sm" className="ml-2">
+            {isInternalLoginHref ? (
+              <Link href={resolvedLoginHref}>Go to Login</Link>
+            ) : (
+              <a href={resolvedLoginHref}>Go to Login</a>
+            )}
+          </Button>
+        )}
+      </div>
+
+      {process.env.NODE_ENV === "development" && (
+        <details className="mt-4">
+          <summary className="cursor-pointer text-xs opacity-70">
+            Error Details (Development)
+          </summary>
+          <pre className="mt-2 max-h-32 overflow-auto text-xs opacity-70">
+            {normalized.stack}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Props for the QueryErrorBoundary component.
+ *
+ * @param children - React children to wrap with error boundary.
+ * @param fallback - Optional custom fallback component; defaults to QueryErrorFallback.
+ * @param onError - Optional handler invoked when errors are caught.
+ * @param onOperationalAlert - Optional handler for operational alerting; invoked before onError.
+ */
+interface QueryErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ComponentType<QueryErrorFallbackProps>;
+  onError?: OptionalAsyncHandler;
+  onOperationalAlert?: OptionalAsyncHandler;
+  loginHref?: string;
+}
+
+/**
+ * React Query-aware error boundary that records OTEL telemetry and supports
+ * optional error handlers.
+ *
+ * Integrates with React Query's error reset mechanism and provides variant-aware
+ * error categorization (network, server, auth, permission, default).
+ *
+ * @param children - React children to wrap with error boundary.
+ * @param fallback - Optional custom fallback component; defaults to QueryErrorFallback.
+ * @param onError - Optional handler invoked when errors are caught.
+ * @param onOperationalAlert - Optional handler for operational alerting; invoked before onError.
+ * @returns ErrorBoundary component wrapping the children.
+ */
+export function QueryErrorBoundary({
+  children,
+  fallback: Fallback = QueryErrorFallback,
+  onError,
+  onOperationalAlert,
+  loginHref,
+}: QueryErrorBoundaryProps) {
+  const { reset } = useQueryErrorResetBoundary();
+  const latestMetaRef = useRef<ErrorMeta | null>(null);
+
+  /**
+   * Handles boundary errors by emitting telemetry and delegating to injected sinks.
+   */
+  const handleError = (error: unknown, info: ErrorInfo) => {
+    const normalized = normalizeThrownError(error);
+    const meta = ResolveMeta(normalized);
+    latestMetaRef.current = meta;
+    RecordTelemetry(normalized, info, meta);
+    SafeInvoke(onOperationalAlert, normalized, info, meta);
+    SafeInvoke(onError, normalized, info, meta);
+  };
+
+  const handleReset = () => {
+    latestMetaRef.current = null;
+    reset();
+  };
+
+  return (
+    <ErrorBoundary
+      FallbackComponent={(props) => {
+        const meta = latestMetaRef.current ?? ResolveMeta(props.error);
+        return (
+          <Fallback
+            {...props}
+            meta={meta}
+            onRetry={props.resetErrorBoundary}
+            loginHref={loginHref}
+          />
+        );
+      }}
+      onReset={handleReset}
+      onError={handleError}
+      resetKeys={[]}
+    >
+      {children}
+    </ErrorBoundary>
+  );
+}
+
+/**
+ * Props for the InlineQueryError component.
+ *
+ * @param error - The error to display.
+ * @param retry - Optional retry callback; button is shown if provided.
+ * @param className - Additional CSS classes to apply.
+ */
+interface InlineQueryErrorProps {
+  error: unknown;
+  retry?: () => void;
+  className?: string;
+}
+
+/**
+ * Inline, non-boundary rendering for query errors with retry affordance.
+ *
+ * Use this component to display query errors inline within the UI rather than
+ * as a full-page boundary fallback. Automatically categorizes errors and shows
+ * appropriate styling and retry controls.
+ *
+ * @param error - The error to display.
+ * @param retry - Optional retry callback; button is shown if provided.
+ * @param className - Additional CSS classes to apply.
+ * @returns Inline error UI component.
+ */
+export function InlineQueryError({
+  error,
+  retry,
+  className = "",
+}: InlineQueryErrorProps) {
+  const meta = ResolveMeta(error);
+  const errorMessage = getErrorMessage(error);
+
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 rounded-md border p-3 text-sm",
+        VARIANT_STYLES[meta.variant] || VARIANT_STYLES.default,
+        className
+      )}
+      data-error-variant={meta.variant}
+      data-error-retryable={meta.isRetryable}
+    >
+      {meta.variant === "network" ? (
+        <WifiOffIcon aria-hidden="true" className="h-4 w-4 shrink-0" />
+      ) : (
+        <AlertTriangleIcon aria-hidden="true" className="h-4 w-4 shrink-0" />
+      )}
+
+      <span className="flex-1">{errorMessage}</span>
+
+      {retry && (
+        <Button
+          type="button"
+          onClick={retry}
+          variant="outline"
+          size="sm"
+          className="h-6 px-2 text-xs"
+          aria-label="Try Again"
+          disabled={!meta.isRetryable}
+        >
+          <RefreshCwIcon aria-hidden="true" className="h-3 w-3" />
+        </Button>
+      )}
+    </div>
+  );
+}

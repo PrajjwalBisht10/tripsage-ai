@@ -1,0 +1,75 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+  # Add resource attributes
+  resource:
+    attributes:
+      - key: service.name
+        value: tripsage-ai
+        action: insert
+      - key: deployment.environment
+        value: ${ENVIRONMENT:-development}
+        action: insert
+
+exporters:
+  # Export traces to Jaeger
+  jaeger:
+    endpoint: jaeger:14250
+    tls:
+      insecure: true
+
+  # Log to console for debugging
+  logging:
+    loglevel: info
+
+  # OTLP exporter for cloud integration
+  # SECURITY: Always use secure TLS in production environments
+  otlp/cloud:
+    endpoint: ${OTLP_ENDPOINT:-localhost:4317}
+    tls:
+      # IMPORTANT: Set OTLP_INSECURE=false in production for secure TLS
+      # Only use insecure=true for local development with proper network isolation
+      insecure: ${OTLP_INSECURE:-false}
+    headers:
+      api-key: ${OTLP_API_KEY:-}
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [jaeger, logging]
+    
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [logging, otlp/cloud]
+    
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters: [logging]

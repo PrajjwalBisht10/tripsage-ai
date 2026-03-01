@@ -1,0 +1,746 @@
+/**
+ * @fileoverview Client-side activity search experience (renders within RSC shell).
+ */
+
+"use client";
+
+import type { Activity, ActivitySearchParams } from "@schemas/search";
+import type { UiTrip } from "@schemas/trips";
+import {
+  AlertCircleIcon,
+  CheckCircleIcon,
+  SearchIcon,
+  SparklesIcon,
+  TicketIcon,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SearchLayout } from "@/components/layouts/search-layout";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CardLoadingSkeleton } from "@/components/ui/query-states";
+import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { useToast } from "@/components/ui/use-toast";
+import { ActivityCard } from "@/features/search/components/cards/activity-card";
+import { ActivitySearchForm } from "@/features/search/components/forms/activity-search-form";
+import { ActivityComparisonModal } from "@/features/search/components/modals/activity-comparison-modal";
+import { TripSelectionModal } from "@/features/search/components/modals/trip-selection-modal";
+import { useSearchOrchestration } from "@/features/search/hooks/search/use-search-orchestration";
+import { useComparisonStore } from "@/features/search/store/comparison-store";
+import { useSearchResultsStore } from "@/features/search/store/search-results-store";
+import { openActivityBooking } from "@/lib/activities/booking";
+import { getErrorMessage } from "@/lib/api/error-types";
+import type { Result, ResultError } from "@/lib/result";
+import { addActivityToTrip, getPlanningTrips } from "./actions";
+import { ActivitiesSelectionDialog } from "./activities-selection-dialog";
+import { isActivity, partitionActivitiesByFallback } from "./activity-results";
+
+/** Maximum number of items allowed in comparison views. */
+const MAX_COMPARISON_ITEMS = 3;
+
+/**
+ * Activity search semantic colors aligned with statusVariants.
+ * - Success indicator: green (active/success)
+ * - AI suggestions: purple (distinct from verified results)
+ */
+const ACTIVITY_COLORS = {
+  aiSuggestionBadge: "bg-highlight/20",
+  aiSuggestionIcon: "text-highlight",
+  successIcon: "text-success",
+} as const;
+
+/** Activity search client component props. */
+interface ActivitiesSearchClientProps {
+  initialUrlParams?: {
+    category?: string;
+    destination?: string;
+  };
+  onSubmitServer: (
+    params: ActivitySearchParams
+  ) => Promise<Result<ActivitySearchParams, ResultError>>;
+}
+
+/**
+ * Activity search client component.
+ * @param initialUrlParams - The initial URL params.
+ * @param onSubmitServer - The server-side submit function.
+ * @returns The activity search client.
+ */
+export default function ActivitiesSearchClient({
+  initialUrlParams,
+  onSubmitServer,
+}: ActivitiesSearchClientProps) {
+  const { toast } = useToast();
+  const [selectedActivity, setSelectedActivity] = useState<Activity | null>(null);
+  const { initializeSearch, executeSearch, isSearching } = useSearchOrchestration();
+  const searchError = useSearchResultsStore((state) => state.error);
+  const activities = useSearchResultsStore((state) => state.results.activities ?? []);
+  const searchMetadata = useSearchResultsStore((state) => state.metrics);
+  const primaryActionRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const [pendingAddFromComparison, setPendingAddFromComparison] = useState(false);
+  const [hasSearched, setHasSearched] = useState(false);
+  const didInitFromUrlParams = useRef(false);
+  const { addItem, removeItem, clearByType, hasItem } = useComparisonStore((state) => ({
+    addItem: state.addItem,
+    clearByType: state.clearByType,
+    hasItem: state.hasItem,
+    removeItem: state.removeItem,
+  }));
+  const activityComparisonItems = useComparisonStore((state) =>
+    state.getItemsByType("activity")
+  );
+
+  const [isTripModalOpen, setIsTripModalOpen] = useState(false);
+  const [trips, setTrips] = useState<UiTrip[]>([]);
+  const [isPending, setIsPending] = useState(false);
+
+  const comparisonList = useMemo(
+    () => new Set(activityComparisonItems.map((item) => item.id)),
+    [activityComparisonItems]
+  );
+
+  // Initialize search type on mount
+  useEffect(() => {
+    initializeSearch("activity");
+  }, [initializeSearch]);
+
+  const manualSearchController = useRef<AbortController | null>(null);
+  useEffect(() => {
+    return () => {
+      manualSearchController.current?.abort();
+      manualSearchController.current = null;
+    };
+  }, []);
+
+  // Initialize search with URL parameters
+  useEffect(() => {
+    if (didInitFromUrlParams.current) return;
+    didInitFromUrlParams.current = true;
+
+    const destination = initialUrlParams?.destination;
+    const category = initialUrlParams?.category;
+    const controller = new AbortController();
+
+    if (destination) {
+      const initialParams: ActivitySearchParams = {
+        category: category || undefined,
+        destination,
+      };
+      (async () => {
+        try {
+          const normalizedParams = await onSubmitServer(initialParams);
+          if (!normalizedParams.ok) {
+            toast({
+              description: normalizedParams.error.reason,
+              title: "Search failed",
+              variant: "destructive",
+            });
+            return;
+          }
+          if (controller.signal.aborted) return;
+          await executeSearch(normalizedParams.data, controller.signal);
+          if (controller.signal.aborted) return;
+          setHasSearched(true);
+        } catch (error) {
+          if (
+            controller.signal.aborted ||
+            (error instanceof Error && error.name === "AbortError")
+          ) {
+            return;
+          }
+          const message = getErrorMessage(error);
+          toast({
+            description: message,
+            title: "Search failed",
+            variant: "destructive",
+          });
+        }
+      })();
+    }
+    return () => controller.abort();
+  }, [executeSearch, initialUrlParams, onSubmitServer, toast]);
+
+  const handleSearch = useCallback(
+    async (params: ActivitySearchParams) => {
+      if (params.destination) {
+        manualSearchController.current?.abort();
+        const controller = new AbortController();
+        manualSearchController.current = controller;
+        try {
+          const normalizedParams = await onSubmitServer(params); // server-side telemetry and validation
+          if (!normalizedParams.ok) {
+            toast({
+              description: normalizedParams.error.reason,
+              title: "Search failed",
+              variant: "destructive",
+            });
+            return;
+          }
+          if (controller.signal.aborted) return;
+          await executeSearch(normalizedParams.data, controller.signal); // client fetch/store update
+          if (controller.signal.aborted) return;
+          setHasSearched(true);
+        } catch (error) {
+          if (
+            controller.signal.aborted ||
+            (error instanceof Error && error.name === "AbortError")
+          ) {
+            return;
+          }
+          const message = getErrorMessage(error);
+          toast({
+            description: message,
+            title: "Search failed",
+            variant: "destructive",
+          });
+        } finally {
+          if (manualSearchController.current === controller) {
+            manualSearchController.current = null;
+          }
+        }
+      }
+    },
+    [executeSearch, onSubmitServer, toast]
+  );
+
+  const handleAddToTripClick = useCallback(async () => {
+    setIsPending(true);
+    try {
+      const fetchedTrips = await getPlanningTrips();
+      if (!fetchedTrips.ok) {
+        toast({
+          description: fetchedTrips.error.reason || "Failed to load trips.",
+          title: "Error",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      setTrips(fetchedTrips.data);
+      setIsTripModalOpen(true);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : error
+            ? String(error)
+            : "Failed to load trips.";
+      if (process.env.NODE_ENV === "development") {
+        console.error("Failed to load trips:", error);
+      }
+      toast({
+        description: message || "Failed to load trips.",
+        title: "Error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsPending(false);
+    }
+  }, [toast]);
+
+  const handleConfirmAddToTrip = useCallback(
+    async (tripId: string) => {
+      if (!selectedActivity) return;
+
+      const currencyRaw = selectedActivity?.currency;
+      const currency =
+        typeof currencyRaw === "string" ? currencyRaw.trim() || "USD" : "USD";
+
+      setIsPending(true);
+      try {
+        const result = await addActivityToTrip(tripId, {
+          currency,
+          description: selectedActivity.description,
+          externalId: selectedActivity.id,
+          location: selectedActivity.location,
+          payload: {
+            ...(selectedActivity.images && { images: selectedActivity.images }),
+            rating: selectedActivity.rating,
+            type: selectedActivity.type,
+          },
+          price: selectedActivity.price,
+          title: selectedActivity.name,
+        });
+
+        if (!result.ok) {
+          toast({
+            description: result.error.reason,
+            title: "Error",
+            variant: "destructive",
+          });
+          return;
+        }
+
+        toast({
+          description: `Added "${selectedActivity.name}" to your trip`,
+          title: "Activity added",
+        });
+
+        setIsTripModalOpen(false);
+        setSelectedActivity(null);
+      } catch (error) {
+        toast({
+          description: getErrorMessage(error),
+          title: "Error",
+          variant: "destructive",
+        });
+      } finally {
+        setIsPending(false);
+      }
+    },
+    [selectedActivity, toast]
+  );
+
+  const handleSelectActivity = useCallback((activity: Activity) => {
+    setSelectedActivity(activity);
+  }, []);
+
+  const [showComparisonModal, setShowComparisonModal] = useState(false);
+
+  const toggleComparison = useCallback(
+    (activity: Activity): void => {
+      // Pre-mutation count from selector; accurate since we early-return after remove
+      const currentCount = activityComparisonItems.length;
+
+      if (hasItem(activity.id)) {
+        removeItem(activity.id);
+        toast({
+          description: `Removed "${activity.name}" from comparison`,
+          title: "Removed from comparison",
+        });
+        return;
+      }
+
+      if (currentCount >= MAX_COMPARISON_ITEMS) {
+        toast({
+          description: `You can compare up to ${MAX_COMPARISON_ITEMS} activities at once`,
+          title: "Comparison limit reached",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      addItem("activity", activity.id, activity);
+      toast({
+        description: `Added "${activity.name}" to comparison`,
+        title: "Added to comparison",
+      });
+    },
+    [activityComparisonItems.length, addItem, hasItem, removeItem, toast]
+  );
+
+  const handleCompareActivity = useCallback(
+    (activity: Activity) => {
+      const hadItem = hasItem(activity.id);
+      toggleComparison(activity);
+      const hasItemAfter = hasItem(activity.id);
+      const nextSize = useComparisonStore.getState().getItemsByType("activity").length;
+
+      if (!hadItem && hasItemAfter && nextSize >= 2) {
+        setShowComparisonModal(true);
+      } else if (hadItem && !hasItemAfter && nextSize <= 1) {
+        setShowComparisonModal(false);
+      }
+    },
+    [hasItem, toggleComparison]
+  );
+
+  const handleRemoveFromComparison = useCallback(
+    (activityId: string) => {
+      // Pre-mutation count; subtract 1 since removeItem hasn't re-rendered yet
+      const currentCount = activityComparisonItems.length;
+      removeItem(activityId);
+      if (currentCount - 1 <= 1) {
+        setShowComparisonModal(false);
+      }
+    },
+    [activityComparisonItems.length, removeItem]
+  );
+
+  const handleAddFromComparison = useCallback((activity: Activity) => {
+    setSelectedActivity(activity);
+    setPendingAddFromComparison(true);
+    setShowComparisonModal(false);
+  }, []);
+
+  const hasActiveResults = activities.length > 0;
+
+  const comparisonActivities = activityComparisonItems
+    .map((item) => item.data)
+    .filter(isActivity);
+
+  const { verifiedActivities, aiSuggestions, allAi } = useMemo(
+    () => partitionActivitiesByFallback(activities),
+    [activities]
+  );
+
+  useEffect(() => {
+    if (!selectedActivity) return;
+
+    const canFocusPrimary =
+      primaryActionRef.current && !primaryActionRef.current.disabled;
+    const focusTarget = canFocusPrimary
+      ? primaryActionRef.current
+      : closeButtonRef.current;
+
+    focusTarget?.focus();
+  }, [selectedActivity]);
+
+  useEffect(() => {
+    if (!showComparisonModal && pendingAddFromComparison) {
+      setPendingAddFromComparison(false);
+      handleAddToTripClick();
+    }
+  }, [handleAddToTripClick, pendingAddFromComparison, showComparisonModal]);
+
+  const handleBookActivity = () => {
+    if (!selectedActivity) return;
+
+    try {
+      const opened = openActivityBooking(selectedActivity);
+      if (!opened) {
+        toast({
+          description:
+            "Booking link unavailable for this activity. Please search for booking options manually.",
+          title: "Booking unavailable",
+          variant: "destructive",
+        });
+        return;
+      }
+    } catch (error) {
+      toast({
+        description: getErrorMessage(error),
+        title: "Booking unavailable",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setSelectedActivity(null);
+  };
+
+  return (
+    <SearchLayout>
+      <TooltipProvider>
+        <div className="space-y-6">
+          {/* Search Form Section */}
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <div className="lg:col-span-1">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <TicketIcon aria-hidden="true" className="h-5 w-5" />
+                    Search Activities
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <ActivitySearchForm onSearch={handleSearch} />
+                </CardContent>
+              </Card>
+            </div>
+
+            <div className="lg:col-span-2 space-y-4">
+              {/* Comparison Bar */}
+              {comparisonList.size > 0 && (
+                <Card className="border-primary/50 bg-primary/5">
+                  <CardContent className="py-4">
+                    <div className="flex items-center justify-between flex-wrap gap-4">
+                      <div className="flex items-center gap-2">
+                        <Badge variant="secondary">
+                          {comparisonList.size}/{MAX_COMPARISON_ITEMS}
+                        </Badge>
+                        <span className="text-sm font-medium">
+                          Activities selected for comparison
+                        </span>
+                      </div>
+                      <div className="flex gap-2">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              size="sm"
+                              onClick={() => setShowComparisonModal(true)}
+                              disabled={comparisonList.size < 2}
+                            >
+                              Compare Now
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            {comparisonList.size < 2
+                              ? "Select at least 2 activities"
+                              : "Open comparison view"}
+                          </TooltipContent>
+                        </Tooltip>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => {
+                            clearByType("activity");
+                            setShowComparisonModal(false);
+                            toast({
+                              description: "Comparison list cleared",
+                              title: "Cleared",
+                            });
+                          }}
+                        >
+                          Clear
+                        </Button>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Loading State */}
+              {isSearching && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <SearchIcon
+                        aria-hidden="true"
+                        className="h-5 w-5 animate-pulse"
+                      />
+                      Searching activities…
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <CardLoadingSkeleton count={3} />
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Error State */}
+              {searchError && (
+                <Alert variant="destructive">
+                  <AlertCircleIcon aria-hidden="true" className="h-4 w-4" />
+                  <AlertTitle>Search Error</AlertTitle>
+                  <AlertDescription>
+                    {searchError.message || "Something went wrong"}
+                  </AlertDescription>
+                </Alert>
+              )}
+
+              {/* Results */}
+              {!isSearching && hasActiveResults && (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-xl font-semibold flex items-center gap-2">
+                      <CheckCircleIcon
+                        aria-hidden="true"
+                        className={`h-5 w-5 ${ACTIVITY_COLORS.successIcon}`}
+                      />
+                      {activities.length} Activities Found
+                    </h2>
+                    {searchMetadata?.provider && (
+                      <Badge variant="outline">
+                        Provider: {searchMetadata.provider}
+                      </Badge>
+                    )}
+                  </div>
+
+                  {/* Mixed Results (Verified + AI) */}
+                  {verifiedActivities.length > 0 && (
+                    <div className="space-y-6">
+                      <div>
+                        <div className="flex items-center gap-2 mb-4">
+                          <CheckCircleIcon
+                            aria-hidden="true"
+                            className={`h-5 w-5 ${ACTIVITY_COLORS.successIcon}`}
+                          />
+                          <h3 className="text-lg font-semibold">Verified Activities</h3>
+                          <Badge variant="secondary">Verified</Badge>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {verifiedActivities.map((activity) => (
+                            <ActivityCard
+                              key={activity.id}
+                              activity={activity}
+                              onSelect={handleSelectActivity}
+                              onCompare={handleCompareActivity}
+                              sourceLabel="Verified"
+                            />
+                          ))}
+                        </div>
+                      </div>
+
+                      {aiSuggestions.length > 0 && (
+                        <>
+                          <Separator />
+                          <div>
+                            <div className="flex items-center gap-2 mb-4">
+                              <SparklesIcon
+                                aria-hidden="true"
+                                className={`h-5 w-5 ${ACTIVITY_COLORS.aiSuggestionIcon}`}
+                              />
+                              <h3 className="text-lg font-semibold">
+                                More Ideas Powered by AI
+                              </h3>
+                              <Badge
+                                variant="secondary"
+                                className={ACTIVITY_COLORS.aiSuggestionBadge}
+                              >
+                                AI Suggestions
+                              </Badge>
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              {aiSuggestions.map((activity) => (
+                                <ActivityCard
+                                  key={activity.id}
+                                  activity={activity}
+                                  onSelect={handleSelectActivity}
+                                  onCompare={handleCompareActivity}
+                                  sourceLabel="AI suggestion"
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Standard Results */}
+                  {verifiedActivities.length === 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {allAi && (
+                        <div className="col-span-full flex items-center gap-2 text-sm text-muted-foreground">
+                          <SparklesIcon
+                            aria-hidden="true"
+                            className="h-4 w-4 text-highlight"
+                          />
+                          <span>All results are AI-generated suggestions</span>
+                        </div>
+                      )}
+                      {activities.map((activity) => (
+                        <ActivityCard
+                          key={activity.id}
+                          activity={activity}
+                          onSelect={handleSelectActivity}
+                          onCompare={handleCompareActivity}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Empty State */}
+              {!isSearching && !hasActiveResults && !searchError && hasSearched && (
+                <Card>
+                  <CardContent className="text-center py-12">
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="rounded-full bg-muted p-4">
+                        <SearchIcon
+                          aria-hidden="true"
+                          className="h-8 w-8 text-muted-foreground"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <h3 className="text-lg font-semibold">No activities found</h3>
+                        <p className="text-muted-foreground max-w-md">
+                          Try searching for a different destination or adjusting your
+                          filters.
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Initial State */}
+              {!isSearching && !hasSearched && !searchError && (
+                <Card className="bg-muted/50">
+                  <CardContent className="text-center py-12">
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="rounded-full bg-background p-4 shadow-sm">
+                        <TicketIcon
+                          aria-hidden="true"
+                          className="h-8 w-8 text-primary"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <h3 className="text-lg font-semibold">
+                          Discover Amazing Activities
+                        </h3>
+                        <p className="text-muted-foreground max-w-md">
+                          Search for activities and experiences at your destination.
+                          Compare options and add them to your trip.
+                        </p>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+            </div>
+          </div>
+
+          {/* Floating Compare Button */}
+          {comparisonList.size > 0 && (
+            <div className="fixed bottom-6 right-6 z-40">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    size="lg"
+                    onClick={() => setShowComparisonModal(true)}
+                    disabled={comparisonList.size < 2}
+                    className="shadow-lg"
+                  >
+                    <TicketIcon aria-hidden="true" className="h-4 w-4 mr-2" />
+                    Compare ({comparisonList.size})
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="left">
+                  {comparisonList.size < 2
+                    ? `Select ${2 - comparisonList.size} more to compare`
+                    : "Open comparison view"}
+                </TooltipContent>
+              </Tooltip>
+            </div>
+          )}
+
+          {/* Comparison Modal */}
+          <ActivityComparisonModal
+            isOpen={showComparisonModal}
+            onClose={() => setShowComparisonModal(false)}
+            activities={comparisonActivities}
+            onRemove={handleRemoveFromComparison}
+            onAddToTrip={handleAddFromComparison}
+          />
+
+          <ActivitiesSelectionDialog
+            selectedActivity={selectedActivity}
+            isOpen={Boolean(selectedActivity) && !isTripModalOpen}
+            onClose={() => setSelectedActivity(null)}
+            onAddToTrip={handleAddToTripClick}
+            onBookActivity={handleBookActivity}
+            isPending={isPending}
+            primaryActionRef={primaryActionRef}
+            closeButtonRef={closeButtonRef}
+          />
+
+          {/* Trip Selection Modal */}
+          {selectedActivity && isTripModalOpen && (
+            <TripSelectionModal
+              isOpen={isTripModalOpen}
+              onClose={() => {
+                setIsTripModalOpen(false);
+                setSelectedActivity(null);
+              }}
+              activity={selectedActivity}
+              trips={trips}
+              onAddToTrip={handleConfirmAddToTrip}
+              isAdding={isPending}
+            />
+          )}
+        </div>
+      </TooltipProvider>
+    </SearchLayout>
+  );
+}

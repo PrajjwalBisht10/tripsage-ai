@@ -1,0 +1,743 @@
+/**
+ * @fileoverview Connection status component with real-time network metrics and analytics.
+ */
+
+"use client";
+
+import {
+  ActivityIcon,
+  AlertTriangleIcon,
+  CheckCircle2Icon,
+  InfoIcon,
+  Loader2Icon,
+  MonitorIcon,
+  RefreshCwIcon,
+  RouterIcon,
+  SignalHighIcon,
+  SignalIcon,
+  SignalLowIcon,
+  SignalMediumIcon,
+  TrendingDownIcon,
+  TrendingUpIcon,
+  WifiIcon,
+  WifiOffIcon,
+  ZapIcon,
+} from "lucide-react";
+import { AnimatePresence, motion } from "motion/react";
+import type React from "react";
+import { useEffect, useMemo, useState } from "react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Progress } from "@/components/ui/progress";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { clampProgress, cn } from "@/lib/utils";
+import { getToneColors, type ToneVariant } from "@/lib/variants/status";
+
+/**
+ * Maps connection status to statusVariants tones for consistent styling.
+ */
+const CONNECTION_STATUS_TONE: Record<ConnectionStatus, ToneVariant> = {
+  connected: "active", // success
+  connecting: "info", // info
+  disconnected: "unknown", // muted
+  error: "error", // destructive
+  reconnecting: "pending", // warning
+};
+
+/**
+ * Get colors for a connection status from the tone system.
+ * Uses getToneColors to derive colors from the single source of truth (TONE_CLASSES).
+ */
+const GetStatusColors = (status: ConnectionStatus) => {
+  const tone = CONNECTION_STATUS_TONE[status];
+  const colors = getToneColors(tone);
+  return {
+    bgColor: colors.bg,
+    borderColor: colors.border,
+    textColor: colors.text,
+  };
+};
+
+const QUALITY_COLORS = {
+  excellent: "text-success",
+  fair: "text-warning",
+  good: "text-info",
+  poor: "text-destructive",
+} as const;
+
+const METRIC_ICON_COLORS = {
+  bandwidth: "text-success",
+  latency: "text-info",
+  packetLoss: "text-warning",
+  uptime: "text-highlight",
+} as const;
+
+const OPTIMIZATION_ICON_COLORS = {
+  bandwidth: "text-info",
+  latency: "text-destructive",
+  packetLoss: "text-warning",
+} as const;
+
+// Type for the connection status
+export type ConnectionStatus =
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "reconnecting"
+  | "error";
+
+// Type for the network metrics interface
+export interface NetworkMetrics {
+  latency: number;
+  bandwidth: number;
+  packetLoss: number;
+  jitter: number;
+  quality: "excellent" | "good" | "fair" | "poor";
+  signalStrength: number; // 0-100
+}
+
+// Type for the connection analytics interface
+export interface ConnectionAnalytics {
+  connectionTime: number;
+  reconnectCount: number;
+  totalMessages: number;
+  failedMessages: number;
+  avgResponseTime: number;
+  lastDisconnection?: Date;
+  uptime: number; // in seconds
+}
+
+// Type for the connection status props
+interface ConnectionStatusProps {
+  status: ConnectionStatus;
+  metrics?: NetworkMetrics;
+  analytics?: ConnectionAnalytics;
+  onReconnect?: () => void;
+  onOptimize?: () => void;
+  className?: string;
+  variant?: "default" | "compact" | "minimal" | "detailed";
+  showMetrics?: boolean;
+  showOptimizations?: boolean;
+}
+
+// Default metrics for the connection status
+const DefaultMetrics: NetworkMetrics = {
+  bandwidth: 0,
+  jitter: 0,
+  latency: 0,
+  packetLoss: 0,
+  quality: "poor",
+  signalStrength: 0,
+};
+
+// Default analytics for the connection status
+const DefaultAnalytics: ConnectionAnalytics = {
+  avgResponseTime: 0,
+  connectionTime: 0,
+  failedMessages: 0,
+  reconnectCount: 0,
+  totalMessages: 0,
+  uptime: 0,
+};
+
+/**
+ * Get the quality color for the connection status
+ *
+ * @param quality - The quality of the connection
+ * @returns The quality color
+ */
+const GetQualityColor = (quality: NetworkMetrics["quality"]) => {
+  return QUALITY_COLORS[quality] ?? "text-muted-foreground";
+};
+/**
+ * Get the signal icon for the connection status
+ *
+ * @param strength - The signal strength
+ * @returns The signal icon
+ */
+const GetSignalIcon = (strength: number) => {
+  if (strength >= 80) return <SignalHighIcon aria-hidden="true" className="h-4 w-4" />;
+  if (strength >= 60)
+    return <SignalMediumIcon aria-hidden="true" className="h-4 w-4" />;
+  if (strength >= 40) return <SignalLowIcon aria-hidden="true" className="h-4 w-4" />;
+  return <SignalIcon aria-hidden="true" className="h-4 w-4" />;
+};
+
+/**
+ * Format the latency for the connection status
+ *
+ * @param ms - The latency in milliseconds
+ * @returns The formatted latency
+ */
+const FormatLatency = (ms: number) => {
+  if (ms < 1000) return `${ms.toFixed(0)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+};
+
+/**
+ * Format the bandwidth for the connection status
+ *
+ * @param bps - The bandwidth in bits per second
+ * @returns The formatted bandwidth
+ */
+const FormatBandwidth = (bps: number) => {
+  if (bps < 1024) return `${bps.toFixed(0)} B/s`;
+  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`;
+  return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`;
+};
+
+/**
+ * Format the uptime for the connection status
+ *
+ * @param seconds - The uptime in seconds
+ * @returns The formatted uptime
+ */
+const FormatUptime = (seconds: number) => {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${secs}s`;
+  return `${secs}s`;
+};
+
+/**
+ * Connection quality indicator component
+ *
+ * @param metrics - The network metrics
+ * @returns The connection quality indicator
+ */
+const ConnectionQualityIndicator: React.FC<{ metrics: NetworkMetrics }> = ({
+  metrics,
+}) => {
+  const qualityScore = useMemo(() => {
+    // Calculate quality score based on multiple factors
+    const latencyScore = Math.max(0, 100 - metrics.latency / 10); // Good latency < 100ms
+    const bandwidthScore = Math.min(100, (metrics.bandwidth / 1000000) * 20); // Good bandwidth > 5MB/s
+    const lossScore = Math.max(0, 100 - metrics.packetLoss * 20); // Good loss < 5%
+    const jitterScore = Math.max(0, 100 - metrics.jitter / 2); // Good jitter < 10ms
+
+    return (latencyScore + bandwidthScore + lossScore + jitterScore) / 4;
+  }, [metrics]);
+
+  return (
+    <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
+        {[
+          { height: 8, key: "bar-0", threshold: 0 },
+          { height: 10, key: "bar-1", threshold: 25 },
+          { height: 12, key: "bar-2", threshold: 50 },
+          { height: 14, key: "bar-3", threshold: 75 },
+        ].map(({ key, height, threshold }) => (
+          <motion.div
+            key={key}
+            className={cn(
+              "w-1 rounded-full",
+              qualityScore >= threshold ? "bg-success" : "bg-muted/60"
+            )}
+            style={{ height: `${height}px` }}
+            initial={{ opacity: 0, scaleY: 0 }}
+            animate={{ opacity: 1, scaleY: 1 }}
+            transition={{ delay: parseInt(key.split("-")[1], 10) * 0.1 }}
+          />
+        ))}
+      </div>
+      <span className={cn("text-sm font-medium", GetQualityColor(metrics.quality))}>
+        {metrics.quality}
+      </span>
+    </div>
+  );
+};
+
+/**
+ * Network optimization suggestions component
+ *
+ * @param metrics - The network metrics
+ * @param onOptimize - The function to optimize the network
+ * @returns The network optimization suggestions
+ */
+const NetworkOptimizationSuggestions: React.FC<{
+  metrics: NetworkMetrics;
+  onOptimize?: () => void;
+}> = ({ metrics, onOptimize }) => {
+  const suggestions = useMemo(() => {
+    const items = [];
+
+    if (metrics.latency > 200) {
+      items.push({
+        action: "Optimize Route",
+        description: "Consider switching to a closer server location",
+        icon: (
+          <TrendingDownIcon
+            aria-hidden="true"
+            className={cn("h-4 w-4", OPTIMIZATION_ICON_COLORS.latency)}
+          />
+        ),
+        title: "High Latency Detected",
+      });
+    }
+
+    if (metrics.packetLoss > 2) {
+      items.push({
+        action: "Check Network",
+        description: "Network connection may be unstable",
+        icon: (
+          <AlertTriangleIcon
+            aria-hidden="true"
+            className={cn("h-4 w-4", OPTIMIZATION_ICON_COLORS.packetLoss)}
+          />
+        ),
+        title: "Packet Loss Detected",
+      });
+    }
+
+    if (metrics.bandwidth < 1000000) {
+      items.push({
+        action: "Optimize Data",
+        description: "Consider reducing data frequency",
+        icon: (
+          <TrendingUpIcon
+            aria-hidden="true"
+            className={cn("h-4 w-4", OPTIMIZATION_ICON_COLORS.bandwidth)}
+          />
+        ),
+        title: "Low Bandwidth",
+      });
+    }
+
+    return items;
+  }, [metrics]);
+
+  if (suggestions.length === 0) return null;
+
+  return (
+    <Alert className="mt-3">
+      <InfoIcon aria-hidden="true" className="h-4 w-4" />
+      <AlertDescription>
+        <div className="space-y-2">
+          {suggestions.map((suggestion) => (
+            <div key={suggestion.title} className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                {suggestion.icon}
+                <div>
+                  <div className="text-sm font-medium">{suggestion.title}</div>
+                  <div className="text-xs text-muted-foreground">
+                    {suggestion.description}
+                  </div>
+                </div>
+              </div>
+              {onOptimize && (
+                <Button variant="outline" size="sm" onClick={onOptimize}>
+                  {suggestion.action}
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+};
+
+/**
+ * Connection status component
+ *
+ * @param props - The connection status props
+ * @returns The connection status component
+ */
+export const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
+  status,
+  metrics = DefaultMetrics,
+  analytics = DefaultAnalytics,
+  onReconnect,
+  onOptimize,
+  className,
+  variant = "default",
+  showMetrics = true,
+  showOptimizations = true,
+}) => {
+  const [showDetails, setShowDetails] = useState(false);
+  const [isAnimating, setIsAnimating] = useState(false);
+  const [lastConnectedTime, setLastConnectedTime] = useState<Date | null>(null);
+
+  useEffect(() => {
+    if (status === "connecting" || status === "reconnecting") {
+      setIsAnimating(true);
+    } else {
+      setIsAnimating(false);
+    }
+
+    if (status === "connected") {
+      setLastConnectedTime(new Date());
+    }
+  }, [status]);
+
+  const getStatusConfig = () => {
+    const colors = GetStatusColors(status);
+    const defaultColors = GetStatusColors("disconnected");
+
+    switch (status) {
+      case "connected":
+        return {
+          bgColor: colors.bgColor,
+          borderColor: colors.borderColor,
+          color: colors.textColor,
+          description: "Real-time connection active",
+          icon: <CheckCircle2Icon aria-hidden="true" className="h-4 w-4" />,
+          label: "Connected",
+          variant: "default" as const,
+        };
+      case "connecting":
+        return {
+          bgColor: colors.bgColor,
+          borderColor: colors.borderColor,
+          color: colors.textColor,
+          description: "Establishing connection…",
+          icon: <Loader2Icon aria-hidden="true" className="h-4 w-4 animate-spin" />,
+          label: "Connecting",
+          variant: "default" as const,
+        };
+      case "reconnecting":
+        return {
+          bgColor: colors.bgColor,
+          borderColor: colors.borderColor,
+          color: colors.textColor,
+          description: `Attempt ${analytics.reconnectCount + 1}`,
+          icon: <RefreshCwIcon aria-hidden="true" className="h-4 w-4 animate-spin" />,
+          label: "Reconnecting",
+          variant: "default" as const,
+        };
+      case "disconnected":
+        return {
+          bgColor: colors.bgColor,
+          borderColor: colors.borderColor,
+          color: colors.textColor,
+          description: "No real-time connection",
+          icon: <WifiOffIcon aria-hidden="true" className="h-4 w-4" />,
+          label: "Disconnected",
+          variant: "default" as const,
+        };
+      case "error":
+        return {
+          bgColor: colors.bgColor,
+          borderColor: colors.borderColor,
+          color: colors.textColor,
+          description: "Failed to establish connection",
+          icon: <AlertTriangleIcon aria-hidden="true" className="h-4 w-4" />,
+          label: "Connection Error",
+          variant: "destructive" as const,
+        };
+      default:
+        return {
+          bgColor: defaultColors.bgColor,
+          borderColor: defaultColors.borderColor,
+          color: defaultColors.textColor,
+          description: "Status unknown",
+          icon: <WifiIcon aria-hidden="true" className="h-4 w-4" />,
+          label: "Unknown",
+          variant: "default" as const,
+        };
+    }
+  };
+
+  const config = getStatusConfig();
+
+  // Minimal variant - just icon and status for status bars
+  if (variant === "minimal") {
+    return (
+      <div className={cn("flex items-center gap-1.5", className)}>
+        <div className={cn("shrink-0", config.color)}>{config.icon}</div>
+        <span className={cn("text-xs font-medium", config.color)}>
+          {status === "connected" ? "Online" : config.label}
+        </span>
+      </div>
+    );
+  }
+
+  // Compact variant - badge format
+  if (variant === "compact") {
+    // Don't show when connected unless there's an issue
+    if (status === "connected" && !showDetails) {
+      return null;
+    }
+
+    return (
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              variant={config.variant}
+              className={cn(
+                "flex items-center gap-2 cursor-pointer transition-colors duration-200",
+                config.color,
+                className
+              )}
+              role="button"
+              tabIndex={0}
+              onClick={() => setShowDetails(!showDetails)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setShowDetails((prev) => !prev);
+                }
+              }}
+            >
+              <motion.div
+                animate={isAnimating ? { rotate: 360 } : {}}
+                transition={{
+                  duration: 1,
+                  repeat: isAnimating ? Number.POSITIVE_INFINITY : 0,
+                }}
+              >
+                {config.icon}
+              </motion.div>
+              {config.label}
+              {status === "connected" && (
+                <div className="flex items-center gap-1">
+                  {GetSignalIcon(metrics.signalStrength)}
+                  <span className="text-xs">{metrics.signalStrength}%</span>
+                </div>
+              )}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            <div className="space-y-1">
+              <div>{config.description}</div>
+              {status === "connected" && showMetrics && (
+                <div className="text-xs space-y-1">
+                  <div>Latency: {FormatLatency(metrics.latency)}</div>
+                  <div>Quality: {metrics.quality}</div>
+                  <div>Uptime: {FormatUptime(analytics.uptime)}</div>
+                </div>
+              )}
+            </div>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    );
+  }
+
+  // Default variant - alert format for chat/messaging
+  if (variant === "default") {
+    // Don't show when connected
+    if (status === "connected") {
+      return null;
+    }
+
+    return (
+      <Alert variant={config.variant} className={cn("mx-4 mb-2", className)}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            {config.icon}
+            <AlertDescription className="font-medium">
+              {config.description}
+            </AlertDescription>
+          </div>
+
+          {(status === "error" || status === "disconnected") && onReconnect && (
+            <Button variant="outline" size="sm" onClick={onReconnect} className="ml-4">
+              <RefreshCwIcon aria-hidden="true" className="h-3 w-3 mr-1" />
+              Reconnect
+            </Button>
+          )}
+        </div>
+      </Alert>
+    );
+  }
+
+  // Detailed variant - full card with metrics
+  return (
+    <Card className={cn("transition-colors duration-300", className)}>
+      <CardHeader className="pb-3">
+        <CardTitle className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <motion.div
+              className={cn("shrink-0", config.color)}
+              animate={isAnimating ? { rotate: 360 } : {}}
+              transition={{
+                duration: 1,
+                repeat: isAnimating ? Number.POSITIVE_INFINITY : 0,
+              }}
+            >
+              {config.icon}
+            </motion.div>
+            <div>
+              <div className={cn("font-medium", config.color)}>{config.label}</div>
+              <div className="text-sm text-muted-foreground">{config.description}</div>
+              {lastConnectedTime && status !== "connected" && (
+                <div className="text-xs text-muted-foreground mt-1">
+                  Last connected: {lastConnectedTime.toLocaleTimeString()}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {status === "connected" && <ConnectionQualityIndicator metrics={metrics} />}
+            {(status === "error" || status === "disconnected") && onReconnect && (
+              <Button variant="outline" size="sm" onClick={onReconnect}>
+                <RefreshCwIcon aria-hidden="true" className="h-4 w-4 mr-1" />
+                Reconnect
+              </Button>
+            )}
+          </div>
+        </CardTitle>
+      </CardHeader>
+
+      <AnimatePresence>
+        {status === "connected" && showMetrics && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <CardContent className="pt-0">
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="text-center p-2 rounded-lg bg-muted">
+                        <ActivityIcon
+                          aria-hidden="true"
+                          className={cn(
+                            "h-4 w-4 mx-auto mb-1",
+                            METRIC_ICON_COLORS.latency
+                          )}
+                        />
+                        <div className="text-sm font-medium">
+                          {FormatLatency(metrics.latency)}
+                        </div>
+                        <div className="text-xs text-muted-foreground">Latency</div>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>Round-trip time for messages</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="text-center p-2 rounded-lg bg-muted">
+                        <ZapIcon
+                          aria-hidden="true"
+                          className={cn(
+                            "h-4 w-4 mx-auto mb-1",
+                            METRIC_ICON_COLORS.bandwidth
+                          )}
+                        />
+                        <div className="text-sm font-medium">
+                          {FormatBandwidth(metrics.bandwidth)}
+                        </div>
+                        <div className="text-xs text-muted-foreground">Bandwidth</div>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>Data transfer rate</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="text-center p-2 rounded-lg bg-muted">
+                        <RouterIcon
+                          aria-hidden="true"
+                          className={cn(
+                            "h-4 w-4 mx-auto mb-1",
+                            METRIC_ICON_COLORS.packetLoss
+                          )}
+                        />
+                        <div className="text-sm font-medium">
+                          {metrics.packetLoss.toFixed(1)}%
+                        </div>
+                        <div className="text-xs text-muted-foreground">Packet Loss</div>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>Percentage of lost data packets</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <div className="text-center p-2 rounded-lg bg-muted">
+                        <MonitorIcon
+                          aria-hidden="true"
+                          className={cn(
+                            "h-4 w-4 mx-auto mb-1",
+                            METRIC_ICON_COLORS.uptime
+                          )}
+                        />
+                        <div className="text-sm font-medium">
+                          {FormatUptime(analytics.uptime)}
+                        </div>
+                        <div className="text-xs text-muted-foreground">Uptime</div>
+                      </div>
+                    </TooltipTrigger>
+                    <TooltipContent>Connection uptime</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              </div>
+
+              {/* Signal Strength Indicator */}
+              <div className="flex items-center gap-3 mb-3">
+                <span className="text-sm text-muted-foreground">Signal Strength:</span>
+                <div className="flex-1">
+                  <Progress
+                    value={clampProgress(metrics.signalStrength)}
+                    className="h-2"
+                  />
+                </div>
+                <span className="text-sm font-medium">{metrics.signalStrength}%</span>
+              </div>
+
+              {/* Analytics */}
+              <div className="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <span className="text-muted-foreground">Messages:</span>
+                  <span className="ml-2 font-medium">
+                    {analytics.totalMessages}
+                    {analytics.failedMessages > 0 && (
+                      <span className={getToneColors("error").text}>
+                        {" "}
+                        ({analytics.failedMessages} failed)
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-muted-foreground">Avg Response:</span>
+                  <span className="ml-2 font-medium">
+                    {FormatLatency(analytics.avgResponseTime)}
+                  </span>
+                </div>
+              </div>
+
+              {/* Network Optimization Suggestions */}
+              {showOptimizations && (
+                <NetworkOptimizationSuggestions
+                  metrics={metrics}
+                  onOptimize={onOptimize}
+                />
+              )}
+            </CardContent>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </Card>
+  );
+};
+
+export default ConnectionStatus;
+
+export const CompactConnectionStatus = (props: ConnectionStatusProps) => (
+  <ConnectionStatus {...props} variant="compact" />
+);

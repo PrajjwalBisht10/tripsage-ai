@@ -1,0 +1,112 @@
+/**
+ * @fileoverview Single metric card component with value, label, and optional trend.
+ */
+
+"use client";
+
+import { ArrowDownIcon, ArrowUpIcon, MinusIcon } from "lucide-react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { cn } from "@/lib/utils";
+
+/**
+ * Trend colors aligned with semantic status tokens.
+ * Positive semantic: up=success (good), down=destructive (bad)
+ * Negative semantic: up=destructive (bad), down=success (good)
+ */
+// biome-ignore lint/style/useNamingConvention: Review requested camelCase naming
+const trendColors = {
+  bad: "text-destructive",
+  good: "text-success",
+  neutral: "text-muted-foreground",
+} as const;
+
+/**
+ * Props for the MetricsCard component.
+ */
+export interface MetricsCardProps {
+  /** Title label for the metric */
+  title: string;
+  /** The metric value to display */
+  value: number | string;
+  /** Optional unit suffix (e.g., "ms", "%") */
+  unit?: string;
+  /** Optional trend direction */
+  trend?: "up" | "down" | "neutral";
+  /** Optional trend value text (e.g., "+5%") */
+  trendValue?: string;
+  /** Optional description text */
+  description?: string;
+  /**
+   * Semantic for interpreting trend direction.
+   * Default treats "up" as negative (red) and "down" as positive (green).
+   * Set to "positive" when increases are good (e.g., revenue).
+   */
+  trendSemantic?: "positive" | "negative";
+  /** Additional CSS classes */
+  className?: string;
+}
+
+/**
+ * Displays a single metric in a card format.
+ *
+ * @param props - Component props
+ * @returns The rendered metrics card
+ *
+ * @example
+ * ```tsx
+ * <MetricsCard title="Total Requests" value={1000} />
+ * <MetricsCard title="Latency" value={150} unit="ms" />
+ * <MetricsCard title="Error Rate" value={5} unit="%" trend="up" trendValue="+2%" />
+ * ```
+ */
+export function MetricsCard({
+  title,
+  value,
+  unit,
+  trend,
+  trendValue,
+  description,
+  trendSemantic = "negative",
+  className,
+}: MetricsCardProps) {
+  const TrendIcon =
+    trend === "up" ? ArrowUpIcon : trend === "down" ? ArrowDownIcon : MinusIcon;
+
+  const trendColor = (() => {
+    if (!trend || trend === "neutral") {
+      return trendColors.neutral;
+    }
+    const isPositive = trendSemantic === "positive";
+    if (trend === "up") {
+      return isPositive ? trendColors.good : trendColors.bad;
+    }
+    return isPositive ? trendColors.bad : trendColors.good;
+  })();
+
+  return (
+    <Card className={cn(className)}>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm font-medium text-muted-foreground">
+          {title}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="text-2xl font-bold">
+          {value}
+          {unit && <span className="ml-1 text-sm font-normal">{unit}</span>}
+        </div>
+        {(trend || description) && (
+          <div className="mt-1 flex items-center gap-1">
+            {trend && <TrendIcon className={cn("h-3 w-3", trendColor)} />}
+            {trendValue && (
+              <span className={cn("text-xs", trendColor)}>{trendValue}</span>
+            )}
+            {description && (
+              <span className="text-xs text-muted-foreground">{description}</span>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

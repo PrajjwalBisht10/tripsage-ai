@@ -1,0 +1,312 @@
+# Dependabot configuration
+# https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+version: 2
+
+updates:
+  # Frontend dependencies (now at root)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    assignees:
+      - "BjornMelin"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+    versioning-strategy: increase-if-necessary
+    labels:
+      - "dependencies"
+      - "frontend"
+    allow:
+      - dependency-type: "all"
+    groups:
+      # Frontend production dependencies
+      frontend-production:
+        dependency-type: "production"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+
+      # Frontend development dependencies
+      frontend-development:
+        dependency-type: "development"
+        applies-to: version-updates
+        exclude-patterns:
+          - "@playwright/*"
+          - "vitest*"
+          - "@biomejs/*"
+          - "@testing-library/*"
+          - "@vitest/*"
+
+      # Frontend development tools
+      frontend-dev-tools:
+        patterns:
+          - "@vitejs/*"
+          - "jscodeshift"
+          - "lint-staged"
+          - "jose"
+          - "jsdom"
+          - "jsondiffpatch"
+          - "tailwindcss*"
+          - "@tailwindcss/*"
+          - "typescript"
+        applies-to: version-updates
+
+      # Frontend framework core
+      frontend-framework:
+        patterns:
+          - "next*"
+          - "@next/*"
+          - "react*"
+          - "react-dom"
+          - "@types/react*"
+        applies-to: version-updates
+
+      # Frontend testing tools
+      frontend-testing:
+        patterns:
+          - "@playwright/*"
+          - "vitest*"
+          - "@testing-library/*"
+          - "@vitest/*"
+        applies-to: version-updates
+
+      # Frontend UI/styling
+      frontend-ui:
+        patterns:
+          - "@radix-ui/*"
+          - "lucide-react"
+          - "tailwindcss*"
+          - "@tailwindcss/*"
+          - "framer-motion"
+          - "class-variance-authority"
+          - "clsx"
+          - "tailwind-merge"
+        applies-to: version-updates
+
+      # Frontend AI/ML dependencies
+      frontend-ai:
+        patterns:
+          - "@ai-sdk/*"
+          - "ai"
+          - "js-tiktoken"
+        applies-to: version-updates
+
+      # Frontend database/cache dependencies
+      frontend-database:
+        patterns:
+          - "@supabase/*"
+          - "@upstash/*"
+        applies-to: version-updates
+
+      # Frontend state management
+      frontend-state-management:
+        patterns:
+          - "@tanstack/*"
+          - "zustand"
+        applies-to: version-updates
+
+      # Frontend form handling
+      frontend-form:
+        patterns:
+          - "@hookform/*"
+          - "react-hook-form"
+        applies-to: version-updates
+
+      # Frontend utility libraries
+      frontend-utility:
+        patterns:
+          - "date-fns"
+          - "nanoid"
+          - "uuid"
+          - "zod"
+          - "cmdk"
+          - "vaul"
+          - "use-stick-to-bottom"
+          - "streamdown"
+          - "web-vitals"
+          - "react-syntax-highlighter"
+          - "recharts"
+          - "react-error-boundary"
+          - "next-themes"
+        applies-to: version-updates
+
+      # Frontend security updates
+      frontend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+    ignore:
+      # Ignore major versions that might have breaking changes
+      - dependency-name: "next"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
+
+  # Python backend dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    assignees:
+      - "BjornMelin"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+    versioning-strategy: increase-if-necessary
+    labels:
+      - "dependencies"
+      - "backend"
+      - "python"
+    allow:
+      - dependency-type: "all"
+    groups:
+      # Backend production dependencies
+      backend-production:
+        dependency-type: "production"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      
+      # Backend development dependencies
+      backend-development:
+        dependency-type: "development"
+        applies-to: version-updates
+        exclude-patterns:
+          - "pytest*"
+          - "ruff*"
+          - "mypy*"
+      
+      # Backend framework core
+      backend-framework:
+        patterns:
+          - "fastapi"
+          - "uvicorn*"
+          - "pydantic*"
+          - "sqlalchemy*"
+          - "httpx"
+          - "anyio"
+        applies-to: version-updates
+      
+      # AI/ML dependencies
+      backend-ai:
+        patterns:
+          - "openai"
+          - "langchain*"
+          - "langgraph"
+          - "langsmith"
+          - "mem0ai"
+          - "tiktoken"
+        applies-to: version-updates
+      
+      # Database/cache dependencies
+      backend-database:
+        patterns:
+          - "supabase"
+          - "redis*"
+          - "greenlet"
+          - "pgvector"
+        applies-to: version-updates
+      
+      # Testing tools
+      backend-testing:
+        patterns:
+          - "pytest*"
+          - "hypothesis"
+          - "coverage*"
+          - "fakeredis"
+          - "nest-asyncio"
+        applies-to: version-updates
+      
+      # Linting/typing tools
+      backend-linting:
+        patterns:
+          - "ruff*"
+          - "mypy*"
+          - "bandit*"
+          - "types-*"
+        applies-to: version-updates
+      
+      # Security updates
+      backend-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "BjornMelin"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "ci/cd"
+      - "github-actions"
+    groups:
+      # Group all GitHub Actions updates
+      actions-all:
+        patterns:
+          - "*"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      
+      # Security updates for actions
+      actions-security:
+        applies-to: security-updates
+        patterns:
+          - "*"
+
+  # Docker dependencies
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "10:00"
+    open-pull-requests-limit: 5
+    assignees:
+      - "BjornMelin"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    labels:
+      - "docker"
+      - "infrastructure"
+    groups:
+      # Group all Docker updates
+      docker-all:
+        patterns:
+          - "*"
+        applies-to: version-updates
+        update-types:
+          - "minor"
+          - "patch"
+      
+      # Security updates for Docker
+      docker-security:
+        applies-to: security-updates
+        patterns:
+          - "*"

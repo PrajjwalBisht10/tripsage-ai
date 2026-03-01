@@ -1,0 +1,58 @@
+/**
+ * @fileoverview Memory agent route handler (frontend-only). - Supabase SSR auth → userId - Provider resolution (BYOK/Gateway) - Guardrails (rate limiting, telemetry) - AI SDK v6 streaming summary response
+ */
+
+import "server-only";
+
+import { runMemoryAgent } from "@ai/agents/memory-agent";
+import { resolveProvider } from "@ai/models/registry";
+import { agentSchemas } from "@schemas/agents";
+import { consumeStream } from "ai";
+import type { NextRequest } from "next/server";
+import { resolveAgentConfig } from "@/lib/agents/config-resolver";
+import { createErrorHandler } from "@/lib/agents/error-recovery";
+import { withApiGuards } from "@/lib/api/factory";
+import { parseJsonBody, requireUserId, validateSchema } from "@/lib/api/route-helpers";
+
+export const maxDuration = 60;
+
+const RequestSchema = agentSchemas.memoryUpdateRequestSchema;
+
+/**
+ * POST /api/agents/memory
+ *
+ * Validates request, resolves provider, and streams a confirmation response.
+ */
+export const POST = withApiGuards({
+  auth: true,
+  botId: true,
+  rateLimit: "agents:memory",
+  telemetry: "agent.memoryUpdate",
+})(async (req: NextRequest, { user }) => {
+  const userResult = requireUserId(user);
+  if (!userResult.ok) return userResult.error;
+  const userId = userResult.data;
+
+  const parsed = await parseJsonBody(req);
+  if (!parsed.ok) return parsed.error;
+
+  const validation = validateSchema(RequestSchema, parsed.data);
+  if (!validation.ok) return validation.error;
+  const body = validation.data;
+
+  const config = await resolveAgentConfig("memoryAgent");
+  const modelHint =
+    config.config.model ?? new URL(req.url).searchParams.get("model") ?? undefined;
+  const { model, modelId } = await resolveProvider(userId, modelHint);
+
+  const result = await runMemoryAgent(
+    { identifier: userId, model, modelId },
+    config.config,
+    body,
+    { abortSignal: req.signal }
+  );
+  return result.toUIMessageStreamResponse({
+    consumeSseStream: consumeStream,
+    onError: createErrorHandler(),
+  });
+});

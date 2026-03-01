@@ -1,0 +1,133 @@
+# Environment Setup Guide (local development)
+
+For local Next.js development, copy the root `.env.local.example` to `.env.local`, then follow the checklists below to populate the required variables. Copy `.env.test.example` to `.env.test` for local/CI test runs.
+
+Notes:
+
+- `.env.example` remains the canonical reference template for deployment/onboarding, but Next.js local development should use `.env.local`.
+- Never commit `.env.local` (it contains secrets); commit templates only.
+
+## Core & Supabase
+
+- Core URLs (all usually `http://localhost:3000` during dev):
+  - `APP_BASE_URL`
+  - `NEXT_PUBLIC_APP_URL`
+  - `NEXT_PUBLIC_SITE_URL`
+  - `NEXT_PUBLIC_API_URL`
+- Supabase (Dashboard → Settings → API):
+  - `NEXT_PUBLIC_SUPABASE_URL`
+  - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (preferred) or `NEXT_PUBLIC_SUPABASE_ANON_KEY` (legacy)
+  - `SUPABASE_SERVICE_ROLE_KEY`
+  - `SUPABASE_JWT_SECRET`
+  - Console: <https://supabase.com/dashboard>
+
+## Upstash (Redis + QStash)
+
+- Redis REST (caching/rate-limit):
+  - `UPSTASH_REDIS_REST_URL` (REST URL)
+  - `UPSTASH_REDIS_REST_TOKEN` (REST token)
+  - Console: <https://console.upstash.com/redis>
+- QStash (jobs/webhooks):
+  - `QSTASH_TOKEN`
+  - `QSTASH_CURRENT_SIGNING_KEY`
+  - `QSTASH_NEXT_SIGNING_KEY`
+  - Console: <https://console.upstash.com/qstash>
+
+## AI providers / Gateway
+
+- Vercel AI Gateway:
+  - `AI_GATEWAY_API_KEY`
+  - `AI_GATEWAY_URL` (optional `baseURL` override for AI SDK Gateway; leave unset to use the SDK default)
+  - Dashboard: <https://vercel.com/ai-gateway>
+- Direct providers:
+  - `OPENAI_API_KEY` — <https://platform.openai.com/api-keys>
+  - `ANTHROPIC_API_KEY` — <https://console.anthropic.com>
+  - `XAI_API_KEY` — <https://console.x.ai>
+  - `OPENROUTER_API_KEY` — <https://openrouter.ai/keys>
+- Reranking provider (optional; used by RAG search):
+  - `TOGETHER_AI_API_KEY` — <https://www.together.ai>
+- Optional:
+  - `EMBEDDINGS_API_KEY` (internal key for `/api/embeddings`; required, otherwise the endpoint is disabled)
+
+## AI demo (disabled by default)
+
+These routes are cost-bearing/privileged and are disabled unless explicitly enabled:
+
+- `ENABLE_AI_DEMO` (set to `"true"` to enable `/api/ai/stream` and `/api/telemetry/ai-demo`)
+- `TELEMETRY_AI_DEMO_KEY` (internal key for `/api/telemetry/ai-demo`)
+
+## Telemetry privacy (required in production)
+
+- `TELEMETRY_HASH_SECRET` (≥32 chars): required in production. Enables stable hashed identifiers in telemetry spans (e.g., `user.id_hash`, `session.id_hash`) and optional HMAC fingerprints on privileged alerts (e.g., `ai_demo.stream.detail_hash`). In non-production, if unset, identifier/fingerprint attributes are omitted by default.
+
+## Search / crawling
+
+- `FIRECRAWL_API_KEY`
+- `FIRECRAWL_BASE_URL` (optional; defaults to hosted API)
+- Docs: <https://docs.firecrawl.dev/getting-started/api-key>
+
+## Maps / Weather
+
+- Google Maps Platform (same credentials page: <https://console.cloud.google.com/google/maps-apis/credentials>)
+  - `GOOGLE_MAPS_SERVER_API_KEY` (server-restricted: Places/Geocoding/Routes)
+  - `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY` (browser, referrer-restricted)
+- Weather:
+  - `OPENWEATHERMAP_API_KEY` — <https://home.openweathermap.org/api_keys>
+
+## Payments
+
+- Stripe keys (<https://dashboard.stripe.com/apikeys>):
+  - `STRIPE_SECRET_KEY`
+  - `STRIPE_WEBHOOK_SECRET` (<https://dashboard.stripe.com/webhooks>)
+  - `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY`
+
+## Email / notifications
+
+- Resend (<https://resend.com/api-keys>):
+  - `RESEND_API_KEY`
+  - `RESEND_FROM_EMAIL`
+  - `RESEND_FROM_NAME`
+- Webhook signing:
+  - `HMAC_SECRET` (generate a strong random string)
+
+## Travel APIs
+
+- Duffel (<https://app.duffel.com/developers>):
+  - `DUFFEL_ACCESS_TOKEN` (preferred)
+  - `DUFFEL_API_KEY` (fallback)
+- Amadeus Self-Service:
+  - <https://developers.amadeus.com/get-started>
+  - Variables: `AMADEUS_CLIENT_ID`, `AMADEUS_CLIENT_SECRET`, `AMADEUS_ENV` (`test`|`production`)
+- Google Places (New):
+  - Enable Places API (New) + Photos in Google Cloud Console
+  - Uses the same Google Maps Platform API keys (no separate Places API key required)
+  - Server-side: `GOOGLE_MAPS_SERVER_API_KEY` (IP+API restricted for Places/Geocoding/Routes)
+  - Browser/client-side: `NEXT_PUBLIC_GOOGLE_MAPS_BROWSER_API_KEY` (referrer-restricted)
+
+## Optional analytics
+
+- `GOOGLE_ANALYTICS_ID` (GA4), `MIXPANEL_TOKEN`, `POSTHOG_HOST`, `POSTHOG_KEY` — create per-provider dashboards; safe to leave empty locally.
+
+## Ready-to-run checklist
+
+> **Note**: This is a reusable onboarding template. Copy and complete when setting up a new development environment.
+
+- [ ] `.env.local` copied from root `.env.local.example` (Next.js local dev)
+- [ ] `.env` copied from root `.env.example` (optional — only if you need shared defaults/legacy workflows)
+- [ ] `.env.test` copied from root `.env.test.example` (local/CI test runs)
+- [ ] Supabase URL + public key (publishable or anon) + service role key present
+- [ ] Upstash Redis REST URL + token present
+- [ ] QStash token + signing keys present
+- [ ] At least one model provider key (OpenAI/Anthropic/xAI/OpenRouter or `AI_GATEWAY_API_KEY`)
+- [ ] Google Maps server key set if using maps; browser key for client maps
+- [ ] Stripe keys set if payment flows are exercised
+- [ ] Resend key and from info set if email notifications are needed
+- [ ] Travel providers set if flights/hotels features are tested
+
+## Quick verification
+
+```bash
+pnpm biome:check && pnpm type-check && pnpm test
+```
+
+If startup validation fails, re-check required variables above before debugging code.

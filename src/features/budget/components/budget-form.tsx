@@ -1,0 +1,723 @@
+/**
+ * @fileoverview Trip budget form component with Zod validation and dynamic category allocation.
+ */
+
+"use client";
+
+import {
+  budgetFormSchema,
+  type ExpenseCategory,
+  expenseCategorySchema,
+} from "@schemas/budget";
+import {
+  AlertCircleIcon,
+  CalculatorIcon,
+  DollarSignIcon,
+  Loader2Icon,
+  PlusIcon,
+  TrendingUpIcon,
+  XIcon,
+} from "lucide-react";
+import React, { useCallback, useState } from "react";
+import { z } from "zod";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { useZodForm } from "@/hooks/use-zod-form";
+import { secureUuid } from "@/lib/security/random";
+import { recordClientErrorOnActiveSpan } from "@/lib/telemetry/client-errors";
+import { cn } from "@/lib/utils";
+
+// Augmented form schema with UI-specific state fields
+const BudgetFormUiSchema = budgetFormSchema
+  .extend({
+    categories: z.array(
+      z.object({
+        amount: z.number().positive("Amount must be positive"),
+        category: expenseCategorySchema,
+        id: z.uuid().optional(),
+      })
+    ),
+  })
+  .and(
+    z.object({
+      alertThreshold: z.number().min(50).max(95).optional(),
+      autoAllocate: z.boolean().optional(),
+      enableAlerts: z.boolean().optional(),
+      notes: z.string().max(500).optional(),
+    })
+  );
+
+type BudgetFormViewData = z.infer<typeof BudgetFormUiSchema>;
+
+interface BudgetFormProps {
+  onSubmit: (data: BudgetFormViewData) => Promise<void>;
+  onCancel?: () => void;
+  initialData?: Partial<BudgetFormViewData>;
+  currencies?: Array<{ code: string; name: string; symbol: string }>;
+  tripId?: string;
+  className?: string;
+}
+
+// Default currency list (would typically come from API)
+const DefaultCurrencies = [
+  { code: "USD", name: "US Dollar", symbol: "$" },
+  { code: "EUR", name: "Euro", symbol: "€" },
+  { code: "GBP", name: "British Pound", symbol: "£" },
+  { code: "JPY", name: "Japanese Yen", symbol: "¥" },
+  { code: "CAD", name: "Canadian Dollar", symbol: "C$" },
+  { code: "AUD", name: "Australian Dollar", symbol: "A$" },
+];
+
+const ExpenseCategories = [
+  {
+    description: "Airfare and airline fees",
+    icon: "✈️",
+    label: "Flights",
+    value: "flights",
+  },
+  {
+    description: "Lodging and accommodation",
+    icon: "🏨",
+    label: "Hotels",
+    value: "accommodations",
+  },
+  {
+    description: "Local transport and car rentals",
+    icon: "🚗",
+    label: "Transport",
+    value: "transportation",
+  },
+  {
+    description: "Meals and beverages",
+    icon: "🍽️",
+    label: "Food & Dining",
+    value: "food",
+  },
+  {
+    description: "Tours, attractions, and entertainment",
+    icon: "🎭",
+    label: "Activities",
+    value: "activities",
+  },
+  {
+    description: "Souvenirs and personal purchases",
+    icon: "🛍️",
+    label: "Shopping",
+    value: "shopping",
+  },
+  {
+    description: "Miscellaneous expenses",
+    icon: "📝",
+    label: "Other",
+    value: "other",
+  },
+] as const;
+
+export const BudgetForm = ({
+  onSubmit,
+  onCancel,
+  initialData,
+  currencies = DefaultCurrencies,
+  tripId: _tripId,
+  className,
+}: BudgetFormProps) => {
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const form = useZodForm({
+    defaultValues: {
+      alertThreshold: 80,
+      autoAllocate: false,
+      categories: (
+        initialData?.categories ?? [
+          { amount: 0, category: "flights" as ExpenseCategory },
+          { amount: 0, category: "accommodations" as ExpenseCategory },
+          { amount: 0, category: "food" as ExpenseCategory },
+        ]
+      ).map((cat) => ({
+        ...cat,
+        id: cat.id ?? secureUuid(),
+      })),
+      currency: "USD",
+      enableAlerts: true,
+      endDate: undefined,
+      name: "",
+      notes: "",
+      startDate: undefined,
+      totalAmount: 0,
+      ...initialData,
+    },
+    onSubmitError: (error) => {
+      recordClientErrorOnActiveSpan(
+        error instanceof Error ? error : new Error(String(error)),
+        { action: "onSubmitError", context: "BudgetForm" }
+      );
+    },
+    onValidationError: (_errors) => {
+      recordClientErrorOnActiveSpan(new Error("Budget form validation failed"), {
+        action: "onValidationError",
+        context: "BudgetForm",
+      });
+    },
+    reValidateMode: "onChange",
+    schema: BudgetFormUiSchema,
+    transformSubmitData: (data) => {
+      // Remove UI-specific fields before submission
+      const {
+        autoAllocate: _autoAllocate,
+        enableAlerts: _enableAlerts,
+        alertThreshold: _alertThreshold,
+        notes: _notes,
+        ...budgetData
+      } = data;
+      return budgetData;
+    },
+    validateMode: "onChange",
+  });
+
+  const totalAmount = form.watch("totalAmount");
+  const categories = form.watch("categories");
+  const autoAllocate = form.watch("autoAllocate");
+  const currency = form.watch("currency");
+
+  const totalAllocated = categories.reduce((sum, category) => sum + category.amount, 0);
+  const remainingAmount = totalAmount - totalAllocated;
+  const allocationPercentage =
+    totalAmount > 0 ? (totalAllocated / totalAmount) * 100 : 0;
+
+  const currencySymbol =
+    currencies.find((c) => c.code === currency)?.symbol || currency;
+
+  const handleAutoAllocate = useCallback(() => {
+    if (!autoAllocate || totalAmount <= 0 || categories.length === 0) return;
+
+    const equalAmount = Math.floor(totalAmount / categories.length);
+    const remainder = totalAmount % categories.length;
+
+    const newCategories = categories.map((category, index) => ({
+      ...category,
+      amount: equalAmount + (index < remainder ? 1 : 0),
+    }));
+
+    form.setValue("categories", newCategories);
+  }, [autoAllocate, totalAmount, categories, form]);
+
+  const addCategory = () => {
+    const availableCategories = ExpenseCategories.filter(
+      (cat) => !categories.some((existing) => existing.category === cat.value)
+    );
+
+    if (availableCategories.length > 0) {
+      const newCategory = {
+        amount: 0,
+        category: availableCategories[0].value as ExpenseCategory,
+        id: secureUuid(),
+      };
+      form.setValue("categories", [...categories, newCategory]);
+    }
+  };
+
+  const removeCategory = (index: number) => {
+    const newCategories = categories.filter((_, i) => i !== index);
+    form.setValue("categories", newCategories);
+  };
+
+  const handleSubmit = form.handleSubmitSafe(
+    async (data) => {
+      setIsSubmitting(true);
+      try {
+        await onSubmit(data);
+      } finally {
+        setIsSubmitting(false);
+      }
+    },
+    (_validationErrors) => {
+      recordClientErrorOnActiveSpan(new Error("Form validation failed"), {
+        action: "handleSubmit",
+        context: "BudgetForm",
+      });
+    }
+  );
+
+  React.useEffect(() => {
+    if (autoAllocate) {
+      handleAutoAllocate();
+    }
+  }, [autoAllocate, handleAutoAllocate]);
+
+  return (
+    <Card className={cn("w-full max-w-4xl mx-auto", className)}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <CalculatorIcon aria-hidden="true" className="h-5 w-5" />
+          Create Budget
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <Form {...form}>
+          <form onSubmit={handleSubmit} className="space-y-6">
+            {/* Basic Information */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <FormField
+                control={form.control}
+                name="name"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Budget Name</FormLabel>
+                    <FormControl>
+                      <Input placeholder="e.g., Europe Trip 2024" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="currency"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Currency</FormLabel>
+                    <Select onValueChange={field.onChange} defaultValue={field.value}>
+                      <FormControl>
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select currency" />
+                        </SelectTrigger>
+                      </FormControl>
+                      <SelectContent>
+                        {currencies.map((curr) => (
+                          <SelectItem key={curr.code} value={curr.code}>
+                            {curr.symbol} {curr.name} ({curr.code})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            {/* Budget Amount */}
+            <FormField
+              control={form.control}
+              name="totalAmount"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel className="flex items-center gap-2">
+                    <DollarSignIcon aria-hidden="true" className="h-4 w-4" />
+                    Total Budget Amount
+                  </FormLabel>
+                  <FormControl>
+                    <div className="relative">
+                      <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground">
+                        {currencySymbol}
+                      </span>
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        placeholder="0.00"
+                        className="pl-8"
+                        {...field}
+                        onChange={(e) =>
+                          field.onChange(Number.parseFloat(e.target.value) || 0)
+                        }
+                      />
+                    </div>
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Date Range */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <FormField
+                control={form.control}
+                name="startDate"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Start Date</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="date"
+                        value={field.value ?? ""}
+                        onChange={(event) =>
+                          field.onChange(event.target.value || undefined)
+                        }
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name="endDate"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>End Date</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="date"
+                        value={field.value ?? ""}
+                        onChange={(event) =>
+                          field.onChange(event.target.value || undefined)
+                        }
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+
+            {/* Budget Categories */}
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-medium">Budget Categories</h3>
+                <div className="flex items-center gap-4">
+                  <FormField
+                    control={form.control}
+                    name="autoAllocate"
+                    render={({ field }) => (
+                      <FormItem className="flex items-center space-x-2 space-y-0">
+                        <FormControl>
+                          <Switch
+                            checked={field.value}
+                            onCheckedChange={field.onChange}
+                          />
+                        </FormControl>
+                        <FormLabel className="text-sm font-normal">
+                          Auto-allocate
+                        </FormLabel>
+                      </FormItem>
+                    )}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={addCategory}
+                    disabled={categories.length >= ExpenseCategories.length}
+                  >
+                    <PlusIcon aria-hidden="true" className="h-4 w-4 mr-1" />
+                    Add Category
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                {categories.map((category) => {
+                  const categoryInfo = ExpenseCategories.find(
+                    (c) => c.value === category.category
+                  );
+                  const percentage =
+                    totalAmount > 0 ? (category.amount / totalAmount) * 100 : 0;
+                  const categoryIndex = categories.findIndex(
+                    (c) => c.id === category.id
+                  );
+
+                  return (
+                    <div
+                      key={category.id ?? category.category}
+                      className="flex items-center gap-4 p-4 border rounded-lg"
+                    >
+                      <div className="shrink-0">
+                        <span className="text-2xl">{categoryInfo?.icon}</span>
+                      </div>
+
+                      <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <FormField
+                          control={form.control}
+                          name={`categories.${categoryIndex}.category`}
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="sr-only">Category</FormLabel>
+                              <Select
+                                onValueChange={field.onChange}
+                                value={field.value}
+                              >
+                                <FormControl>
+                                  <SelectTrigger>
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                </FormControl>
+                                <SelectContent>
+                                  {ExpenseCategories.map((cat) => (
+                                    <SelectItem
+                                      key={cat.value}
+                                      value={cat.value}
+                                      disabled={categories.some(
+                                        (existing, existingIndex) =>
+                                          existing.category === cat.value &&
+                                          existingIndex !== categoryIndex
+                                      )}
+                                    >
+                                      {cat.icon} {cat.label}
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+
+                        <FormField
+                          control={form.control}
+                          name={`categories.${categoryIndex}.amount`}
+                          render={({ field }) => (
+                            <FormItem>
+                              <FormLabel className="sr-only">Amount</FormLabel>
+                              <FormControl>
+                                <div className="relative">
+                                  <span className="absolute left-3 top-1/2 transform -translate-y-1/2 text-muted-foreground">
+                                    {currencySymbol}
+                                  </span>
+                                  <Input
+                                    type="number"
+                                    min="0"
+                                    step="0.01"
+                                    placeholder="0.00"
+                                    className="pl-8"
+                                    {...field}
+                                    onChange={(e) =>
+                                      field.onChange(
+                                        Number.parseFloat(e.target.value) || 0
+                                      )
+                                    }
+                                    disabled={autoAllocate}
+                                  />
+                                </div>
+                              </FormControl>
+                              <FormMessage />
+                            </FormItem>
+                          )}
+                        />
+
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className="text-xs">
+                            {percentage.toFixed(1)}%
+                          </Badge>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => removeCategory(categoryIndex)}
+                            disabled={categories.length <= 1}
+                          >
+                            <XIcon aria-hidden="true" className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Budget Summary */}
+              <div className="p-4 bg-muted/50 rounded-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium">Budget Allocation</span>
+                  <span className="text-sm text-muted-foreground">
+                    {allocationPercentage.toFixed(1)}%
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex justify-between text-sm">
+                    <span>Total Budget:</span>
+                    <span className="font-medium">
+                      {currencySymbol}
+                      {totalAmount.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Allocated:</span>
+                    <span className="font-medium">
+                      {currencySymbol}
+                      {totalAllocated.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span>Remaining:</span>
+                    <span
+                      className={cn(
+                        "font-medium",
+                        remainingAmount < 0
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      )}
+                    >
+                      {currencySymbol}
+                      {remainingAmount.toFixed(2)}
+                    </span>
+                  </div>
+                </div>
+
+                {remainingAmount < 0 && (
+                  <Alert className="mt-3">
+                    <AlertCircleIcon aria-hidden="true" className="h-4 w-4" />
+                    <AlertDescription className="text-sm">
+                      You've allocated more than your total budget. Please adjust your
+                      category amounts.
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </div>
+            </div>
+
+            {/* Budget Settings */}
+            <div className="space-y-4">
+              <h3 className="text-lg font-medium">Settings</h3>
+
+              <FormField
+                control={form.control}
+                name="enableAlerts"
+                render={({ field }) => (
+                  <FormItem className="flex items-center justify-between space-y-0 rounded-lg border p-4">
+                    <div className="space-y-0.5">
+                      <FormLabel className="text-base font-medium">
+                        Budget Alerts
+                      </FormLabel>
+                      <div className="text-sm text-muted-foreground">
+                        Get notified when you approach your budget limits
+                      </div>
+                    </div>
+                    <FormControl>
+                      <Switch checked={field.value} onCheckedChange={field.onChange} />
+                    </FormControl>
+                  </FormItem>
+                )}
+              />
+
+              {form.watch("enableAlerts") && (
+                <FormField
+                  control={form.control}
+                  name="alertThreshold"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Alert Threshold (%)</FormLabel>
+                      <FormControl>
+                        <div className="flex items-center gap-4">
+                          <Input
+                            type="number"
+                            min="50"
+                            max="95"
+                            step="5"
+                            {...field}
+                            onChange={(e) =>
+                              field.onChange(Number.parseInt(e.target.value, 10) || 80)
+                            }
+                            className="w-20"
+                          />
+                          <span className="text-sm text-muted-foreground">
+                            Alert when {field.value}% of budget is used
+                          </span>
+                        </div>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
+            </div>
+
+            {/* Notes */}
+            <FormField
+              control={form.control}
+              name="notes"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Notes (Optional)</FormLabel>
+                  <FormControl>
+                    <Textarea
+                      placeholder="Add any additional notes about this budget…"
+                      className="resize-none"
+                      rows={3}
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {/* Form Validation Summary */}
+            {!form.isFormComplete && (
+              <Alert>
+                <AlertCircleIcon aria-hidden="true" className="h-4 w-4" />
+                <AlertDescription>
+                  Please complete all required fields before submitting.
+                  {form.validationState.validationErrors.length > 0 && (
+                    <ul className="mt-2 list-disc list-inside text-sm">
+                      {form.validationState.validationErrors.map((error) => (
+                        <li key={error}>{error}</li>
+                      ))}
+                    </ul>
+                  )}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {/* Submit Actions */}
+            <Separator />
+            <div className="flex gap-4 justify-end">
+              {onCancel && (
+                <Button type="button" variant="outline" onClick={onCancel}>
+                  Cancel
+                </Button>
+              )}
+              <Button
+                type="submit"
+                disabled={
+                  isSubmitting ||
+                  form.validationState.isValidating ||
+                  !form.isFormComplete
+                }
+                className="min-w-32"
+              >
+                {isSubmitting ? (
+                  <>
+                    <Loader2Icon
+                      aria-hidden="true"
+                      className="mr-2 h-4 w-4 animate-spin"
+                    />
+                    Creating…
+                  </>
+                ) : (
+                  <>
+                    <TrendingUpIcon aria-hidden="true" className="mr-2 h-4 w-4" />
+                    Create Budget
+                  </>
+                )}
+              </Button>
+            </div>
+          </form>
+        </Form>
+      </CardContent>
+    </Card>
+  );
+};

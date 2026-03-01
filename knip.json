@@ -1,0 +1,26 @@
+{
+  "$schema": "https://unpkg.com/knip@latest/schema.json",
+  "entry": [
+    "src/app/**/{page,layout,template,loading,error,not-found,default,head}.{ts,tsx}!",
+    "src/app/**/route.{ts,tsx}!",
+    "scripts/**/*.{ts,tsx,js,mjs,cjs}"
+  ],
+  "ignoreDependencies": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/github",
+    "@semantic-release/npm",
+    "@semantic-release/release-notes-generator",
+    "conventional-changelog-conventionalcommits",
+    "shiki"
+  ],
+  "ignoreFiles": ["src/test/mocks/rehype-harden.ts"],
+  "project": [
+    "src/**/*.{ts,tsx}!",
+    "scripts/**/*.{ts,tsx,js,mjs,cjs}",
+    "e2e/**/*.{ts,tsx}",
+    "!**/.next/**",
+    "!**/coverage/**",
+    "!**/playwright-report/**",
+    "!**/test-results/**"
+  ]
+}

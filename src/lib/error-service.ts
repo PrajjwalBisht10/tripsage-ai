@@ -1,0 +1,215 @@
+/**
+ * @fileoverview Error service for logging, reporting, and telemetry integration. Client-only module - uses browser globals (localStorage, navigator, window).
+ */
+
+"use client";
+
+import {
+  type ErrorReport,
+  type ErrorServiceConfig,
+  errorReportSchema,
+} from "@schemas/errors";
+import { normalizeThrownError } from "@/lib/client/normalize-thrown-error";
+import { secureId } from "@/lib/security/random";
+import {
+  type ErrorSpanMetadata,
+  recordClientErrorOnActiveSpan,
+} from "@/lib/telemetry/client-errors";
+
+/**
+ * Error service for logging and reporting errors
+ */
+class ErrorService {
+  private config: ErrorServiceConfig;
+  private queue: ErrorReport[] = [];
+  private isProcessing = false;
+
+  constructor(config: ErrorServiceConfig) {
+    this.config = config;
+  }
+
+  /**
+   * Report an error with validation
+   */
+  async reportError(
+    report: ErrorReport,
+    spanMetadata?: ErrorSpanMetadata
+  ): Promise<void> {
+    try {
+      // Validate the error report using Zod
+      const validatedReport = errorReportSchema.parse(report);
+
+      // Record exception to active OpenTelemetry span if available.
+      // This links the error to the distributed trace for better observability.
+      if (validatedReport.error) {
+        try {
+          // Create Error object from report for span recording
+          const error = new Error(validatedReport.error.message);
+          error.name = validatedReport.error.name || "Error";
+          if (validatedReport.error.stack) {
+            error.stack = validatedReport.error.stack;
+          }
+          recordClientErrorOnActiveSpan(error, spanMetadata);
+        } catch {
+          // Don't fail error reporting if OTel recording fails
+          // Telemetry errors are non-critical
+        }
+      }
+
+      if (!this.config.enabled) {
+        // Error reporting disabled - silently skip
+        return;
+      }
+
+      // Add to queue for processing
+      this.queue.push(validatedReport);
+
+      // Store in localStorage for persistence if enabled
+      if (this.config.enableLocalStorage) {
+        this.storeErrorLocally(validatedReport);
+      }
+
+      // Process the queue
+      if (!this.isProcessing) {
+        await this.processQueue();
+      }
+    } catch {
+      // Silently fail error reporting to avoid recursive error loops
+    }
+  }
+
+  /**
+   * Process error queue with retry logic
+   */
+  private async processQueue(): Promise<void> {
+    if (this.queue.length === 0) return;
+
+    this.isProcessing = true;
+
+    try {
+      while (this.queue.length > 0) {
+        const report = this.queue.shift();
+        if (report) {
+          await this.sendErrorReport(report);
+        }
+      }
+    } catch {
+      // Silently fail queue processing to avoid recursive errors
+    } finally {
+      this.isProcessing = false;
+    }
+  }
+
+  /**
+   * Send error report to remote service
+   */
+  private async sendErrorReport(report: ErrorReport, retryCount = 0): Promise<void> {
+    const maxRetries = this.config.maxRetries ?? 3;
+
+    try {
+      if (!this.config.endpoint) {
+        // No endpoint configured - silently skip
+        return;
+      }
+
+      const response = await fetch(this.config.endpoint, {
+        body: JSON.stringify(report),
+        headers: {
+          "Content-Type": "application/json",
+          ...(this.config.apiKey && {
+            // biome-ignore lint/style/useNamingConvention: HTTP header name
+            Authorization: `Bearer ${this.config.apiKey}`,
+          }),
+        },
+        method: "POST",
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+    } catch (_error) {
+      if (retryCount < maxRetries) {
+        // Exponential backoff
+        const delay = 2 ** retryCount * 1000;
+        setTimeout(() => {
+          this.sendErrorReport(report, retryCount + 1);
+        }, delay);
+      }
+      // Silently fail after max retries to avoid recursive errors
+    }
+  }
+
+  /**
+   * Store error in localStorage for offline persistence
+   */
+  private storeErrorLocally(report: ErrorReport): void {
+    try {
+      const key = `error_${Date.now()}_${secureId(9)}`;
+      localStorage.setItem(key, JSON.stringify(report));
+
+      // Clean up old errors (keep last 10)
+      this.cleanupLocalErrors();
+    } catch {
+      // Silently fail local storage operations
+    }
+  }
+
+  /**
+   * Clean up old local errors
+   */
+  private cleanupLocalErrors(): void {
+    try {
+      const errorKeys = Object.keys(localStorage)
+        .filter((key) => key.startsWith("error_"))
+        .sort()
+        .reverse();
+
+      // Keep only the last 10 errors
+      const keysToRemove = errorKeys.slice(10);
+      for (const key of keysToRemove) {
+        localStorage.removeItem(key);
+      }
+    } catch {
+      // Silently fail cleanup operations
+    }
+  }
+
+  /**
+   * Create error report from error and additional info
+   */
+  createErrorReport(
+    error: unknown,
+    errorInfo?: { componentStack?: string },
+    additionalInfo?: Partial<ErrorReport>
+  ): ErrorReport {
+    const normalized = normalizeThrownError(error);
+    return {
+      error: {
+        digest: normalized.digest,
+        message: normalized.message,
+        name: normalized.name,
+        stack: normalized.stack,
+      },
+      errorInfo: errorInfo
+        ? {
+            componentStack: errorInfo.componentStack || "",
+          }
+        : undefined,
+      timestamp: new Date().toISOString(),
+      url: window.location.href,
+      userAgent: navigator.userAgent,
+      ...additionalInfo,
+    };
+  }
+}
+
+// Default error service instance
+export const errorService = new ErrorService({
+  apiKey: undefined,
+  enabled: process.env.NODE_ENV === "production",
+  enableLocalStorage: true,
+  endpoint: undefined,
+  maxRetries: 3,
+});
+
+export { ErrorService };

@@ -1,0 +1,244 @@
+/**
+ * @fileoverview Server Actions for trip planning integration. Handles fetching user trips and adding activities to trips.
+ */
+
+"use server";
+
+import "server-only";
+
+import { type ActivitySearchParams, activitySearchParamsSchema } from "@schemas/search";
+import { type TripsRow, tripsRowSchema } from "@schemas/supabase";
+import {
+  type ItineraryItemCreateInput,
+  itineraryItemCreateSchema,
+  type UiTrip,
+} from "@schemas/trips";
+import { z } from "zod";
+import { bumpTag } from "@/lib/cache/tags";
+import {
+  err,
+  ok,
+  type Result,
+  type ResultError,
+  zodErrorToFieldErrors,
+} from "@/lib/result";
+import { createServerSupabase } from "@/lib/supabase/server";
+import { getMany, getSingle, insertSingle } from "@/lib/supabase/typed-helpers";
+import { createServerLogger } from "@/lib/telemetry/logger";
+import { withTelemetrySpan } from "@/lib/telemetry/span";
+import { mapDbTripToUi, mapItineraryItemUpsertToDbInsert } from "@/lib/trips/mappers";
+
+const logger = createServerLogger("search.activities.actions");
+const tripIdSchema = z.coerce.number().int().positive();
+
+/**
+ * Validates/normalizes activity search parameters inside a server-side telemetry span.
+ *
+ * Note: this action does not execute the activity search itself.
+ *
+ * @param params - Activity search parameters to validate and normalize.
+ * @returns A result containing validated parameters or validation errors.
+ */
+// biome-ignore lint/suspicious/useAwait: withTelemetrySpan returns a Promise synchronously
+export async function submitActivitySearch(
+  params: ActivitySearchParams
+): Promise<Result<ActivitySearchParams, ResultError>> {
+  return withTelemetrySpan(
+    "search.activity.server.submit",
+    {
+      attributes: {
+        destination: params.destination,
+        searchType: "activity",
+      },
+    },
+    () => {
+      const validation = activitySearchParamsSchema.safeParse(params);
+      if (!validation.success) {
+        return err({
+          error: "invalid_request",
+          fieldErrors: zodErrorToFieldErrors(validation.error),
+          issues: validation.error.issues,
+          reason: "Invalid activity search parameters",
+        });
+      }
+      return ok(validation.data);
+    }
+  );
+}
+
+/**
+ * Fetches the authenticated user's active and planning trips.
+ *
+ * Retrieves trips with "planning" or "active" status from Supabase.
+ * Results are mapped to the UI trip format.
+ *
+ * @returns A Result with the list of UI-formatted trips, or a ResultError if
+ * unauthorized or fetch fails.
+ */
+export async function getPlanningTrips(): Promise<Result<UiTrip[], ResultError>> {
+  const supabase = await createServerSupabase();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return err({
+      error: "unauthorized",
+      reason: "Unauthorized",
+    });
+  }
+
+  const { data, error } = await getMany(
+    supabase,
+    "trips",
+    (qb) => qb.eq("user_id", user.id).in("status", ["planning", "active"]),
+    { ascending: false, orderBy: "created_at" }
+  );
+
+  if (error) {
+    logger.error("Failed to fetch trips", {
+      error,
+    });
+    return err({
+      error: "internal",
+      reason: "Failed to fetch trips",
+    });
+  }
+
+  const rows: TripsRow[] = (data ?? []).flatMap((row) => {
+    const parsed = tripsRowSchema.safeParse(row);
+    if (parsed.success) {
+      return [parsed.data];
+    }
+    logger.warn("Invalid trip row skipped", {
+      issues: parsed.error.issues,
+      tripId: (row as { id?: unknown })?.id,
+    });
+    return [];
+  });
+  return ok(rows.map((row) => mapDbTripToUi(row, { currentUserId: user.id })));
+}
+
+/**
+ * Adds an activity to a specific trip.
+ *
+ * Validates trip ownership and activity data before inserting into Supabase.
+ * Invalidates "trips" cache tag upon success.
+ *
+ * @param tripId - The ID of the trip to add the activity to.
+ * @param activityData - The activity details including title, price, etc.
+ * @returns A Result with `{ success: true }` on success, or a ResultError
+ * with one of: "unauthorized" (not authenticated), "forbidden" (trip not
+ * found or access denied), "invalid_request" (validation failure with
+ * fieldErrors), or "internal" (database insert error).
+ */
+export async function addActivityToTrip(
+  tripId: number | string,
+  activityData: {
+    title: string;
+    description?: string;
+    location?: string;
+    price?: number;
+    currency?: string;
+    startAt?: string;
+    endAt?: string;
+    externalId?: string;
+    payload?: Record<string, unknown>;
+  }
+): Promise<Result<{ success: true }, ResultError>> {
+  const tripIdValidation = tripIdSchema.safeParse(tripId);
+  if (!tripIdValidation.success) {
+    return err({
+      error: "invalid_request",
+      fieldErrors: zodErrorToFieldErrors(tripIdValidation.error),
+      issues: tripIdValidation.error.issues,
+      reason: "Invalid trip id",
+    });
+  }
+  const validatedTripId = tripIdValidation.data;
+
+  const supabase = await createServerSupabase();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return err({
+      error: "unauthorized",
+      reason: "Unauthorized",
+    });
+  }
+
+  // Validate trip ownership
+  // Skip schema validation since we only select `id` for an existence check.
+  const { data: tripData, error: tripError } = await getSingle(
+    supabase,
+    "trips",
+    (qb) => qb.eq("id", validatedTripId).eq("user_id", user.id),
+    { select: "id", validate: false }
+  );
+
+  if (tripError || !tripData) {
+    return err({
+      error: "forbidden",
+      reason: "Trip not found or access denied",
+    });
+  }
+
+  const payload: ItineraryItemCreateInput = {
+    bookingStatus: "planned" as const,
+    currency: activityData.currency ?? "USD",
+    description: activityData.description,
+    endAt: activityData.endAt,
+    externalId: activityData.externalId,
+    itemType: "activity" as const,
+    location: activityData.location,
+    payload: activityData.payload ?? {},
+    price: activityData.price,
+    startAt: activityData.startAt,
+    title: activityData.title,
+    tripId: validatedTripId,
+  };
+
+  const validation = itineraryItemCreateSchema.safeParse(payload);
+
+  if (!validation.success) {
+    logger.warn("Invalid activity data", { issues: validation.error.issues });
+    return err({
+      error: "invalid_request",
+      fieldErrors: zodErrorToFieldErrors(validation.error),
+      issues: validation.error.issues,
+      reason: "Invalid activity data",
+    });
+  }
+
+  const insertPayload = mapItineraryItemUpsertToDbInsert(validation.data, user.id);
+
+  const { error: insertError } = await insertSingle(
+    supabase,
+    "itinerary_items",
+    insertPayload,
+    { select: "id", validate: false }
+  );
+
+  if (insertError) {
+    logger.error("Failed to add activity to trip", {
+      code: (insertError as { code?: unknown } | null)?.code ?? null,
+      message: insertError instanceof Error ? insertError.message : "insert failed",
+    });
+    return err({
+      error: "internal",
+      reason: "Failed to add activity to trip",
+    });
+  }
+
+  try {
+    await bumpTag("trips");
+  } catch (cacheError) {
+    logger.warn("Failed to invalidate trips cache", {
+      error: cacheError instanceof Error ? cacheError.message : "unknown",
+    });
+  }
+
+  return ok({ success: true });
+}

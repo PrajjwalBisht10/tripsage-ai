@@ -1,0 +1,205 @@
+/**
+ * @fileoverview Zod schemas for travel planning API responses and travel planning tool inputs.
+ */
+
+import { z } from "zod";
+
+const UUID_V4 = z.uuid().describe("Unique identifier for travel plans");
+const ISO_DATE = z
+  .string()
+  .date({ error: "must be YYYY-MM-DD" })
+  .describe("Date in YYYY-MM-DD format");
+const PREFERENCES = z
+  .record(z.string(), z.unknown())
+  .default({})
+  .describe("User preferences for travel planning");
+
+/** Schema for combineSearchResults tool input. */
+export const combineSearchResultsInputSchema = z.strictObject({
+  accommodationResults: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .describe("Search results for accommodations"),
+  activityResults: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .describe("Search results for activities"),
+  destinationInfo: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .describe("Information about the destination"),
+  endDate: ISO_DATE.nullable().describe("End date for the travel period"),
+  flightResults: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .describe("Search results for flights"),
+  startDate: ISO_DATE.nullable().describe("Start date for the travel period"),
+  userPreferences: PREFERENCES.nullable().describe(
+    "User preferences to consider in planning"
+  ),
+});
+
+/** Schema for createTravelPlan tool input. */
+export const createTravelPlanInputSchema = z.strictObject({
+  budget: z
+    .number()
+    .min(0)
+    .nullable()
+    .describe("Total budget for the trip in the user's currency"),
+  destinations: z
+    .array(z.string().min(1))
+    .min(1)
+    .describe("List of destination cities or places to visit"),
+  endDate: ISO_DATE.describe("End date for the travel plan"),
+  preferences: PREFERENCES.nullable().describe(
+    "User preferences for accommodation, activities, etc."
+  ),
+  startDate: ISO_DATE.describe("Start date for the travel plan"),
+  title: z
+    .string()
+    .min(1, { error: "title required" })
+    .describe("Descriptive title for the travel plan"),
+  travelers: z.number().int().min(1).max(50).default(1).describe("Number of travelers"),
+  userId: z.string().min(1).nullish().describe("User identifier for the plan owner"),
+});
+
+/** Schema for saveTravelPlan tool input. */
+export const saveTravelPlanInputSchema = z.strictObject({
+  finalize: z
+    .boolean()
+    .default(false)
+    .nullable()
+    .describe("Whether to finalize and lock the plan"),
+  planId: UUID_V4.describe("Unique identifier of the plan to save"),
+  userId: z.string().min(1).nullish().describe("User identifier for authorization"),
+});
+
+/** Schema for updateTravelPlan tool input. */
+export const updateTravelPlanInputSchema = z.strictObject({
+  planId: UUID_V4.describe("Unique identifier of the plan to update"),
+  updates: z
+    .looseRecord(z.string(), z.unknown())
+    .describe("Fields to update in the plan"),
+  userId: z.string().min(1).nullish().describe("User identifier for authorization"),
+});
+
+// ===== TOOL OUTPUT SCHEMAS =====
+
+/**
+ * Schema for createTravelPlan tool response.
+ *
+ * Represents either an error response or a successful plan creation result.
+ */
+export const createTravelPlanResponseSchema = z.discriminatedUnion("success", [
+  z.object({
+    error: z.string().describe("Error message"),
+    success: z.literal(false),
+  }),
+  z.object({
+    message: z.string().describe("Success message"),
+    plan: z.unknown().describe("Created plan object"),
+    planId: UUID_V4,
+    success: z.literal(true),
+  }),
+]);
+
+/** TypeScript type for createTravelPlan tool response. */
+export type CreateTravelPlanResponse = z.infer<typeof createTravelPlanResponseSchema>;
+
+/**
+ * Schema for saveTravelPlan tool response.
+ *
+ * Represents either an error response or a successful plan save result.
+ */
+export const saveTravelPlanResponseSchema = z.discriminatedUnion("success", [
+  z.object({
+    error: z.string().describe("Error message"),
+    success: z.literal(false),
+  }),
+  z.object({
+    message: z.string().describe("Success message"),
+    planId: UUID_V4,
+    status: z.string().describe("Plan status after save"),
+    success: z.literal(true),
+    summaryMarkdown: z.string().describe("Markdown summary of the plan"),
+  }),
+]);
+
+/** TypeScript type for saveTravelPlan tool response. */
+export type SaveTravelPlanResponse = z.infer<typeof saveTravelPlanResponseSchema>;
+
+/**
+ * Schema for updateTravelPlan tool response.
+ *
+ * Represents either an error response or a successful plan update result.
+ */
+export const updateTravelPlanResponseSchema = z.discriminatedUnion("success", [
+  z.object({
+    error: z.string().describe("Error message"),
+    success: z.literal(false),
+  }),
+  z.object({
+    message: z.string().describe("Success message"),
+    plan: z.unknown().describe("Updated plan object"),
+    planId: UUID_V4,
+    success: z.literal(true),
+  }),
+]);
+
+/** TypeScript type for updateTravelPlan tool response. */
+export type UpdateTravelPlanResponse = z.infer<typeof updateTravelPlanResponseSchema>;
+
+const combinedRecommendationsSchema = z.strictObject({
+  accommodations: z.array(z.unknown()),
+  activities: z.array(z.unknown()),
+  flights: z.array(z.unknown()),
+});
+
+const combinedResultsSchema = z.strictObject({
+  destinationHighlights: z.array(z.unknown()),
+  recommendations: combinedRecommendationsSchema,
+  totalEstimatedCost: z.number().describe("Estimated total cost"),
+  travelTips: z.array(z.unknown()),
+});
+
+/**
+ * Schema for combineSearchResults tool response.
+ *
+ * Represents either an error response or a successful combine result.
+ */
+export const combineSearchResultsResponseSchema = z.discriminatedUnion("success", [
+  z.object({
+    error: z.string().describe("Error message"),
+    success: z.literal(false),
+  }),
+  z.object({
+    combinedResults: combinedResultsSchema,
+    message: z.string().describe("Success message"),
+    success: z.literal(true),
+  }),
+]);
+
+/** TypeScript type for combineSearchResults tool response. */
+export type CombineSearchResultsResponse = z.infer<
+  typeof combineSearchResultsResponseSchema
+>;
+
+/**
+ * Schema for deleteTravelPlan tool response.
+ */
+export const deleteTravelPlanResponseSchema = z.discriminatedUnion("success", [
+  z.object({
+    approval: z.unknown().optional().describe("Approval metadata when required"),
+    error: z.string().describe("Error message"),
+    planId: UUID_V4.optional(),
+    success: z.literal(false),
+  }),
+  z.object({
+    message: z.string().describe("Success message"),
+    planId: UUID_V4,
+    success: z.literal(true),
+  }),
+]);
+
+/** TypeScript type for deleteTravelPlan tool response. */
+export type DeleteTravelPlanResponse = z.infer<typeof deleteTravelPlanResponseSchema>;

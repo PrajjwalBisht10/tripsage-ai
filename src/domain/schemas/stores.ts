@@ -1,0 +1,938 @@
+/**
+ * @fileoverview Zustand store state validation schemas. Runtime validation for all store state mutations and data across auth, user, search, trip, chat, UI, budget, and API key stores.
+ */
+
+import { z } from "zod";
+import { messageRoleSchema } from "./chat";
+import { primitiveSchemas } from "./registry";
+import { searchTypeSchema as baseSearchTypeSchema } from "./search";
+import { storeTripSchema } from "./trips";
+
+// ===== CORE SCHEMAS =====
+// Core store state patterns and reusable schemas
+
+// Common validation patterns using registry primitives
+const TIMESTAMP_SCHEMA = primitiveSchemas.isoDateTime;
+const UUID_SCHEMA = primitiveSchemas.uuid;
+const EMAIL_SCHEMA = primitiveSchemas.email;
+const URL_SCHEMA = primitiveSchemas.url;
+const POSITIVE_NUMBER_SCHEMA = primitiveSchemas.positiveNumber;
+const NON_NEGATIVE_NUMBER_SCHEMA = primitiveSchemas.nonNegativeNumber;
+
+// ===== SEARCH PARAMS STORE SCHEMAS =====
+
+export const searchTypeSchema = baseSearchTypeSchema;
+export type SearchType = z.infer<typeof searchTypeSchema>;
+
+export const baseSearchParamsStoreSchema = z.object({
+  adults: z.number().min(1).max(20).default(1),
+  children: z.number().min(0).max(10).default(0),
+  infants: z.number().min(0).max(5).default(0),
+});
+
+export const flightSearchParamsStoreSchema = baseSearchParamsStoreSchema.extend({
+  cabinClass: z
+    .enum(["economy", "premium_economy", "business", "first"])
+    .default("economy"),
+  departureDate: z.string().optional(),
+  destination: z.string().optional(),
+  directOnly: z.boolean().default(false),
+  excludedAirlines: z.array(z.string()).default([]),
+  maxStops: z.number().min(0).max(3).optional(),
+  origin: z.string().optional(),
+  preferredAirlines: z.array(z.string()).default([]),
+  returnDate: z.string().optional(),
+});
+
+export type ValidatedFlightParams = z.infer<typeof flightSearchParamsStoreSchema>;
+
+export const accommodationSearchParamsStoreSchema = baseSearchParamsStoreSchema.extend({
+  amenities: z.array(z.string()).default([]),
+  checkIn: z.string().optional(),
+  checkOut: z.string().optional(),
+  destination: z.string().optional(),
+  minRating: z.number().min(1).max(5).optional(),
+  priceRange: z
+    .object({
+      max: z.number().min(0).optional(),
+      min: z.number().min(0).optional(),
+    })
+    .optional(),
+  propertyType: z.enum(["hotel", "apartment", "villa", "hostel", "resort"]).optional(),
+  rooms: z.number().min(1).max(10).default(1),
+});
+
+export type ValidatedAccommodationParams = z.infer<
+  typeof accommodationSearchParamsStoreSchema
+>;
+
+export const activitySearchParamsStoreSchema = baseSearchParamsStoreSchema.extend({
+  category: z.string().optional(),
+  date: z.string().optional(),
+  destination: z.string().optional(),
+  difficulty: z.enum(["easy", "moderate", "challenging", "extreme"]).optional(),
+  duration: z
+    .object({
+      max: z.number().min(0).optional(),
+      min: z.number().min(0).optional(),
+    })
+    .optional(),
+  indoor: z.boolean().optional(),
+});
+
+export type ValidatedActivityParams = z.infer<typeof activitySearchParamsStoreSchema>;
+
+export const destinationSearchParamsStoreSchema = z.object({
+  bounds: z
+    .object({
+      east: z.number(),
+      north: z.number(),
+      south: z.number(),
+      west: z.number(),
+    })
+    .optional(),
+  countryCode: z.string().optional(),
+  limit: z.number().min(1).max(50).default(10),
+  query: z.string().default(""),
+  types: z.array(z.string()).default(["locality", "country"]),
+});
+
+export type ValidatedDestinationParams = z.infer<
+  typeof destinationSearchParamsStoreSchema
+>;
+
+// ===== SEARCH FILTERS STORE SCHEMAS =====
+
+export const sortDirectionSchema = z.enum(["asc", "desc"]);
+
+export const filterValueSchema = z.union([
+  z.string(),
+  z.number(),
+  z.boolean(),
+  z.array(z.string()),
+  z.array(z.number()),
+  z.object({
+    max: z.number().optional(),
+    min: z.number().optional(),
+  }),
+]);
+
+export type FilterValue = z.infer<typeof filterValueSchema>;
+
+export const filterOptionSchema = z.object({
+  category: z.string().optional(),
+  defaultValue: filterValueSchema.optional(),
+  dependencies: z.array(z.string()).optional(),
+  description: z.string().optional(),
+  id: z.string(),
+  label: z.string(),
+  options: z
+    .array(
+      z.object({
+        disabled: z.boolean().optional(),
+        label: z.string(),
+        value: z.string(),
+      })
+    )
+    .optional(),
+  required: z.boolean().default(false),
+  type: z.enum([
+    "text",
+    "number",
+    "boolean",
+    "select",
+    "multiselect",
+    "range",
+    "date",
+    "daterange",
+  ]),
+  validation: z
+    .object({
+      max: z.number().optional(),
+      min: z.number().optional(),
+      pattern: z.string().optional(),
+      required: z.boolean().optional(),
+    })
+    .optional(),
+});
+
+export type ValidatedFilterOption = z.infer<typeof filterOptionSchema>;
+
+export const sortOptionSchema = z.object({
+  category: z.string().optional(),
+  description: z.string().optional(),
+  direction: sortDirectionSchema.default("asc"),
+  field: z.string(),
+  id: z.string(),
+  isDefault: z.boolean().default(false),
+  label: z.string(),
+});
+
+export type ValidatedSortOption = z.infer<typeof sortOptionSchema>;
+
+export const activeFilterSchema = z.object({
+  appliedAt: TIMESTAMP_SCHEMA,
+  displayValue: z.string().optional(),
+  filterId: z.string(),
+  value: filterValueSchema,
+});
+
+export type ActiveFilter = z.infer<typeof activeFilterSchema>;
+
+export const filterPresetSchema = z.object({
+  createdAt: TIMESTAMP_SCHEMA,
+  description: z.string().optional(),
+  filters: z.array(activeFilterSchema),
+  id: z.string(),
+  isBuiltIn: z.boolean().default(false),
+  name: z.string(),
+  searchType: searchTypeSchema,
+  sortOption: sortOptionSchema.optional(),
+  usageCount: z.number().default(0),
+});
+
+export type FilterPreset = z.infer<typeof filterPresetSchema>;
+export type SortDirection = z.infer<typeof sortDirectionSchema>;
+
+// ===== UI STORE SUPPORT SCHEMAS =====
+
+export const themeSchema = z.enum(["light", "dark", "system"]);
+export type Theme = z.infer<typeof themeSchema>;
+
+export const notificationTypeSchema = z.enum(["info", "success", "warning", "error"]);
+export type NotificationType = z.infer<typeof notificationTypeSchema>;
+
+export const loadingStateSchema = z.enum(["idle", "loading", "success", "error"]);
+export type LoadingState = z.infer<typeof loadingStateSchema>;
+
+export const notificationSchema = z.object({
+  action: z
+    .object({
+      label: z.string(),
+      onClick: z.function().optional(),
+    })
+    .optional(),
+  createdAt: TIMESTAMP_SCHEMA,
+  duration: z.number().positive().optional(),
+  id: z.string(),
+  isRead: z.boolean().default(false),
+  message: z.string().optional(),
+  title: z.string(),
+  type: notificationTypeSchema,
+});
+
+export type Notification = z.infer<typeof notificationSchema>;
+
+export const loadingStatesSchema = z.record(z.string(), loadingStateSchema);
+export type LoadingStates = z.infer<typeof loadingStatesSchema>;
+
+// ===== SEARCH HISTORY STORE SCHEMAS =====
+
+export const searchHistoryItemSchema = z.object({
+  id: z.string(),
+  location: z
+    .object({
+      city: z.string().optional(),
+      coordinates: z
+        .object({
+          lat: z.number(),
+          lng: z.number(),
+        })
+        .optional(),
+      country: z.string().optional(),
+    })
+    .optional(),
+  params: z.looseRecord(z.string(), z.unknown()),
+  resultsCount: z.number().min(0).optional(),
+  searchDuration: z.number().min(0).optional(),
+  searchType: searchTypeSchema,
+  timestamp: TIMESTAMP_SCHEMA,
+  userAgent: z.string().optional(),
+});
+
+export type SearchHistoryItem = z.infer<typeof searchHistoryItemSchema>;
+
+export const savedSearchSchema = z.object({
+  createdAt: TIMESTAMP_SCHEMA,
+  description: z.string().max(500).optional(),
+  id: z.string(),
+  isFavorite: z.boolean().default(false),
+  isPublic: z.boolean().default(false),
+  lastUsed: TIMESTAMP_SCHEMA.optional(),
+  metadata: z
+    .object({
+      originalSearchId: z.string().optional(),
+      source: z.string().optional(),
+      version: z.string().default("1.0"),
+    })
+    .optional(),
+  name: z.string().min(1).max(100),
+  params: z.looseRecord(z.string(), z.unknown()),
+  searchType: searchTypeSchema,
+  tags: z.array(z.string()).default([]),
+  updatedAt: TIMESTAMP_SCHEMA,
+  usageCount: z.number().min(0).default(0),
+});
+
+export type ValidatedSavedSearch = z.infer<typeof savedSearchSchema>;
+
+export const searchCollectionSchema = z.object({
+  createdAt: TIMESTAMP_SCHEMA,
+  createdBy: z.string().optional(),
+  description: z.string().max(500).optional(),
+  id: z.string(),
+  isPublic: z.boolean().default(false),
+  name: z.string().min(1).max(100),
+  searchIds: z.array(z.string()),
+  tags: z.array(z.string()).default([]),
+  updatedAt: TIMESTAMP_SCHEMA,
+});
+
+export type SearchCollection = z.infer<typeof searchCollectionSchema>;
+
+export const quickSearchSchema = z.object({
+  color: z.string().optional(),
+  createdAt: TIMESTAMP_SCHEMA,
+  icon: z.string().optional(),
+  id: z.string(),
+  isVisible: z.boolean().default(true),
+  label: z.string().min(1).max(50),
+  params: z.looseRecord(z.string(), z.unknown()),
+  searchType: searchTypeSchema,
+  sortOrder: z.number().default(0),
+});
+
+export type QuickSearch = z.infer<typeof quickSearchSchema>;
+
+// ===== SEARCH RESULTS STORE SCHEMAS =====
+
+export const searchStatusSchema = z.enum([
+  "idle",
+  "searching",
+  "success",
+  "error",
+  "cancelled",
+]);
+
+export type SearchStatus = z.infer<typeof searchStatusSchema>;
+
+export const searchMetricsSchema = z.object({
+  currentPage: z.number().min(1).default(1),
+  hasMoreResults: z.boolean().default(false),
+  provider: z.string().optional(),
+  requestId: z.string().optional(),
+  resultsPerPage: z.number().min(1).default(20),
+  searchDuration: z.number().min(0).optional(),
+  totalResults: z.number().min(0).default(0),
+});
+
+export type SearchMetrics = z.infer<typeof searchMetricsSchema>;
+
+export const searchContextSchema = z.object({
+  completedAt: TIMESTAMP_SCHEMA.optional(),
+  metrics: searchMetricsSchema.optional(),
+  searchId: z.string(),
+  searchParams: z.looseRecord(z.string(), z.unknown()),
+  searchType: searchTypeSchema,
+  startedAt: TIMESTAMP_SCHEMA,
+});
+
+export type SearchContext = z.infer<typeof searchContextSchema>;
+
+export const errorDetailsSchema = z.object({
+  code: z.string().optional(),
+  details: z.looseRecord(z.string(), z.unknown()).optional(),
+  message: z.string(),
+  occurredAt: TIMESTAMP_SCHEMA,
+  retryable: z.boolean().default(true),
+});
+
+export type ErrorDetails = z.infer<typeof errorDetailsSchema>;
+
+/**
+ * Base loading state schema for store state.
+ * Includes error handling and loading indicators.
+ */
+const LOADING_STATE_SCHEMA = z.object({
+  error: z.string().nullable(),
+  isLoading: z.boolean(),
+  lastUpdated: TIMESTAMP_SCHEMA.optional(),
+});
+
+/**
+ * Base pagination state schema for store state.
+ * Includes pagination metadata for list views.
+ */
+const PAGINATION_STATE_SCHEMA = z.object({
+  hasNext: z.boolean(),
+  hasPrevious: z.boolean(),
+  page: z.number().int().positive(),
+  pageSize: z.number().int().positive().max(100),
+  total: NON_NEGATIVE_NUMBER_SCHEMA,
+});
+
+/**
+ * Zod schema for auth-specific user preferences (UI settings).
+ * Note: Distinct from memory.ts USER_PREFERENCES_SCHEMA which is for travel preferences.
+ */
+export const AUTH_USER_PREFERENCES_SCHEMA = z.object({
+  analytics: z.boolean().optional(),
+  autoSaveSearches: z.boolean().optional(),
+  currency: primitiveSchemas.isoCurrency.optional(),
+  dateFormat: z.enum(["MM/DD/YYYY", "DD/MM/YYYY", "YYYY-MM-DD"]).optional(),
+  language: z.string().optional(),
+  locationServices: z.boolean().optional(),
+  notifications: z
+    .object({
+      email: z.boolean().optional(),
+      marketing: z.boolean().optional(),
+      priceAlerts: z.boolean().optional(),
+      tripReminders: z.boolean().optional(),
+    })
+    .optional(),
+  smartSuggestions: z.boolean().optional(),
+  theme: z.enum(["light", "dark", "system"]).optional(),
+  timeFormat: z.enum(["12h", "24h"]).optional(),
+  timezone: z.string().optional(),
+  units: z.enum(["metric", "imperial"]).optional(),
+});
+
+/** TypeScript type for auth user preferences. */
+export type AuthUserPreferences = z.infer<typeof AUTH_USER_PREFERENCES_SCHEMA>;
+
+/**
+ * Zod schema for auth user security settings.
+ * Includes two-factor authentication and security questions.
+ */
+export const AUTH_USER_SECURITY_SCHEMA = z.object({
+  lastPasswordChange: primitiveSchemas.isoDateTime.optional(),
+  securityQuestions: z
+    .array(
+      z.object({
+        answer: z.string(), // This would be hashed in real implementation
+        question: z.string(),
+      })
+    )
+    .optional(),
+  twoFactorEnabled: z.boolean().optional(),
+});
+
+/** TypeScript type for auth user security. */
+export type AuthUserSecurity = z.infer<typeof AUTH_USER_SECURITY_SCHEMA>;
+
+/**
+ * Zod schema for auth user entities.
+ * Validates user data including profile, preferences, and security settings.
+ */
+export const AUTH_USER_SCHEMA = z.object({
+  avatarUrl: URL_SCHEMA.optional(),
+  bio: z.string().optional(),
+  createdAt: primitiveSchemas.isoDateTime,
+  displayName: z.string().optional(),
+  email: EMAIL_SCHEMA,
+  firstName: z.string().optional(),
+  id: primitiveSchemas.uuid,
+  isEmailVerified: z.boolean(),
+  lastName: z.string().optional(),
+  location: z.string().optional(),
+  preferences: AUTH_USER_PREFERENCES_SCHEMA.optional(),
+  security: AUTH_USER_SECURITY_SCHEMA.optional(),
+  updatedAt: primitiveSchemas.isoDateTime,
+  website: URL_SCHEMA.optional(),
+});
+
+/** TypeScript type for auth users. */
+export type AuthUser = z.infer<typeof AUTH_USER_SCHEMA>;
+
+/**
+ * Zod schema for authentication token information.
+ * Validates access and refresh tokens with expiration.
+ */
+export const AUTH_TOKEN_INFO_SCHEMA = z.object({
+  accessToken: z.string(),
+  expiresAt: primitiveSchemas.isoDateTime,
+  refreshToken: z.string().optional(),
+  tokenType: z.string().default("Bearer"),
+});
+
+/** TypeScript type for auth token information. */
+export type AuthTokenInfo = z.infer<typeof AUTH_TOKEN_INFO_SCHEMA>;
+
+/**
+ * Zod schema for authentication session entities.
+ * Validates session data including device information and expiration.
+ */
+export const AUTH_SESSION_SCHEMA = z.object({
+  createdAt: primitiveSchemas.isoDateTime,
+  deviceInfo: z
+    .object({
+      deviceId: z.string().optional(),
+      ipAddress: z.string().optional(),
+      userAgent: z.string().optional(),
+    })
+    .optional(),
+  expiresAt: primitiveSchemas.isoDateTime,
+  id: primitiveSchemas.uuid,
+  lastActivity: primitiveSchemas.isoDateTime,
+  userId: primitiveSchemas.uuid,
+});
+
+/** TypeScript type for auth sessions. */
+export type AuthSession = z.infer<typeof AUTH_SESSION_SCHEMA>;
+
+// ===== STATE SCHEMAS =====
+// Schemas for Zustand store state management
+
+/**
+ * Zod schema for auth store state.
+ * Manages authentication state including user, session, and loading indicators.
+ */
+export const authStoreStateSchema = z.object({
+  error: z.string().nullable(),
+  isAuthenticated: z.boolean(),
+  isLoading: z.boolean(),
+  lastAuthCheck: TIMESTAMP_SCHEMA.optional(),
+  session: z
+    .object({
+      accessToken: z.string(),
+      expiresAt: TIMESTAMP_SCHEMA,
+      refreshToken: z.string(),
+    })
+    .nullable(),
+  user: z
+    .object({
+      avatar: URL_SCHEMA.optional(),
+      email: EMAIL_SCHEMA,
+      emailVerified: z.boolean(),
+      firstName: z.string(),
+      id: UUID_SCHEMA,
+      lastName: z.string(),
+      role: z.enum(["user", "admin", "moderator"]),
+      twoFactorEnabled: z.boolean(),
+    })
+    .nullable(),
+});
+
+/** TypeScript type for auth store state. */
+export type AuthStoreState = z.infer<typeof authStoreStateSchema>;
+
+/**
+ * Zod schema for auth store actions.
+ * Validates action function signatures for auth store.
+ */
+export const authStoreActionsSchema = z.object({
+  checkAuth: z.function(),
+  clearError: z.function(),
+  refreshToken: z.function(),
+  signIn: z.function(),
+  signOut: z.function(),
+  signUp: z.function(),
+  updateUser: z.function(),
+});
+
+/** TypeScript type for auth store actions. */
+export type AuthStoreActions = z.infer<typeof authStoreActionsSchema>;
+
+/**
+ * Zod schema for search store state.
+ * Manages search parameters, results, filters, and saved searches.
+ */
+export const searchStoreStateSchema = z
+  .object({
+    currentParams: z.looseRecord(z.string(), z.unknown()).nullable(),
+    currentSearchType: z
+      .enum(["flight", "accommodation", "activity", "destination"])
+      .nullable(),
+    filters: z.looseRecord(z.string(), z.unknown()),
+    pagination: PAGINATION_STATE_SCHEMA.optional(),
+    recentSearches: z.array(
+      z.object({
+        id: z.string(),
+        params: z.looseRecord(z.string(), z.unknown()),
+        timestamp: TIMESTAMP_SCHEMA,
+        type: z.enum(["flight", "accommodation", "activity", "destination"]),
+      })
+    ),
+    results: z.object({
+      accommodations: z.array(z.unknown()).optional(),
+      activities: z.array(z.unknown()).optional(),
+      destinations: z.array(z.unknown()).optional(),
+      flights: z.array(z.unknown()).optional(),
+    }),
+    savedSearches: z.array(
+      z.object({
+        createdAt: TIMESTAMP_SCHEMA,
+        id: z.string(),
+        lastUsed: TIMESTAMP_SCHEMA.optional(),
+        name: z.string(),
+        params: z.looseRecord(z.string(), z.unknown()),
+        type: z.enum(["flight", "accommodation", "activity", "destination"]),
+      })
+    ),
+    sorting: z
+      .object({
+        direction: z.enum(["asc", "desc"]),
+        field: z.string(),
+      })
+      .optional(),
+  })
+  .extend(LOADING_STATE_SCHEMA.shape);
+
+/** TypeScript type for search store state. */
+export type SearchStoreState = z.infer<typeof searchStoreStateSchema>;
+
+/**
+ * Zod schema for search store actions.
+ * Validates action function signatures for search store.
+ */
+export const searchStoreActionsSchema = z.object({
+  addToRecentSearches: z.function(),
+  clearRecentSearches: z.function(),
+  clearResults: z.function(),
+  deleteSavedSearch: z.function(),
+  executeSearch: z.function(),
+  loadMore: z.function(),
+  loadSavedSearch: z.function(),
+  reset: z.function(),
+  saveSearch: z.function(),
+  setFilters: z.function(),
+  setSearchType: z.function(),
+  setSorting: z.function(),
+  updateParams: z.function(),
+});
+
+/** TypeScript type for search store actions. */
+export type SearchStoreActions = z.infer<typeof searchStoreActionsSchema>;
+
+/**
+ * Zod schema for trip store state.
+ * Manages trip data, filters, pagination, and current trip selection.
+ */
+export const tripStoreStateSchema = z
+  .object({
+    currentTrip: storeTripSchema.nullable(),
+    filters: z.object({
+      dateRange: z
+        .object({
+          end: z.iso.date(),
+          start: z.iso.date(),
+        })
+        .optional(),
+      search: z.string().optional(),
+      status: z
+        .array(z.enum(["planning", "booked", "active", "completed", "cancelled"]))
+        .optional(),
+    }),
+    pagination: PAGINATION_STATE_SCHEMA,
+    sorting: z.object({
+      direction: z.enum(["asc", "desc"]),
+      field: z.enum(["createdAt", "startDate", "title", "status"]),
+    }),
+    trips: z.array(storeTripSchema),
+  })
+  .extend(LOADING_STATE_SCHEMA.shape);
+
+/** TypeScript type for trip store state. */
+export type TripStoreState = z.infer<typeof tripStoreStateSchema>;
+
+/**
+ * Zod schema for trip store actions.
+ * Validates action function signatures for trip store.
+ */
+export const tripStoreActionsSchema = z.object({
+  clearCurrentTrip: z.function(),
+  clearFilters: z.function(),
+  createTrip: z.function(),
+  deleteTrip: z.function(),
+  duplicateTrip: z.function(),
+  fetchTrips: z.function(),
+  loadMore: z.function(),
+  refresh: z.function(),
+  reset: z.function(),
+  setCurrentTrip: z.function(),
+  setSorting: z.function(),
+  updateFilters: z.function(),
+  updateTrip: z.function(),
+});
+
+/** TypeScript type for trip store actions. */
+export type TripStoreActions = z.infer<typeof tripStoreActionsSchema>;
+
+/**
+ * Zod schema for chat store state.
+ * Manages conversations, messages, typing indicators, and connection status.
+ */
+export const chatStoreStateSchema = z
+  .object({
+    connectionStatus: z.enum(["connected", "connecting", "disconnected", "error"]),
+    conversations: z.array(
+      z.object({
+        createdAt: TIMESTAMP_SCHEMA,
+        id: UUID_SCHEMA,
+        messages: z.array(
+          z.object({
+            content: z.string(),
+            id: UUID_SCHEMA,
+            metadata: z.looseRecord(z.string(), z.unknown()).optional(),
+            role: messageRoleSchema,
+            timestamp: TIMESTAMP_SCHEMA,
+          })
+        ),
+        status: z.enum(["active", "archived", "deleted"]),
+        title: z.string(),
+        updatedAt: TIMESTAMP_SCHEMA,
+      })
+    ),
+    currentConversation: z
+      .object({
+        id: UUID_SCHEMA,
+        messages: z.array(z.unknown()),
+        status: z.enum(["active", "archived", "deleted"]),
+        title: z.string(),
+      })
+      .nullable(),
+    isTyping: z.boolean(),
+    typingUsers: z.array(z.string()),
+  })
+  .extend(LOADING_STATE_SCHEMA.shape);
+
+/** TypeScript type for chat store state. */
+export type ChatStoreState = z.infer<typeof chatStoreStateSchema>;
+
+/**
+ * Zod schema for chat store actions.
+ * Validates action function signatures for chat store.
+ */
+export const chatStoreActionsSchema = z.object({
+  addTypingUser: z.function(),
+  archiveConversation: z.function(),
+  createConversation: z.function(),
+  deleteConversation: z.function(),
+  deleteMessage: z.function(),
+  editMessage: z.function(),
+  fetchConversations: z.function(),
+  removeTypingUser: z.function(),
+  reset: z.function(),
+  sendMessage: z.function(),
+  setConnectionStatus: z.function(),
+  setCurrentConversation: z.function(),
+  setTyping: z.function(),
+});
+
+/** TypeScript type for chat store actions. */
+export type ChatStoreActions = z.infer<typeof chatStoreActionsSchema>;
+
+/**
+ * Zod schema for UI store state.
+ * Manages UI state including modals, notifications, toasts, sidebar, and theme.
+ */
+export const uiStoreStateSchema = z.object({
+  breadcrumbs: z.array(
+    z.object({
+      href: z.string().optional(),
+      isActive: z.boolean(),
+      label: z.string(),
+    })
+  ),
+  globalError: z.string().nullable(),
+  modals: z.record(
+    z.string(),
+    z.object({
+      data: z.unknown().optional(),
+      isOpen: z.boolean(),
+    })
+  ),
+  notifications: z.array(
+    z.object({
+      actions: z
+        .array(
+          z.object({
+            action: z.function(),
+            label: z.string(),
+          })
+        )
+        .optional(),
+      createdAt: TIMESTAMP_SCHEMA,
+      duration: z.number().positive().optional(),
+      id: z.string(),
+      message: z.string(),
+      title: z.string(),
+      type: z.enum(["success", "error", "warning", "info"]),
+    })
+  ),
+  pageLoading: z.boolean(),
+  sidebar: z.object({
+    isCollapsed: z.boolean(),
+    isOpen: z.boolean(),
+    width: z.number().positive(),
+  }),
+  theme: z.enum(["light", "dark", "system"]),
+  toasts: z.array(
+    z.object({
+      action: z
+        .object({
+          label: z.string(),
+          onClick: z.function(),
+        })
+        .optional(),
+      description: z.string(),
+      duration: z.number().positive().optional(),
+      id: z.string(),
+      title: z.string().optional(),
+      type: z.enum(["success", "error", "warning", "info"]),
+    })
+  ),
+});
+
+/** TypeScript type for UI store state. */
+export type UiStoreState = z.infer<typeof uiStoreStateSchema>;
+
+/**
+ * Zod schema for UI store actions.
+ * Validates action function signatures for UI store.
+ */
+export const uiStoreActionsSchema = z.object({
+  addNotification: z.function(),
+  addToast: z.function(),
+  clearGlobalError: z.function(),
+  clearNotifications: z.function(),
+  clearToasts: z.function(),
+  closeModal: z.function(),
+  openModal: z.function(),
+  removeNotification: z.function(),
+  removeToast: z.function(),
+  reset: z.function(),
+  setBreadcrumbs: z.function(),
+  setGlobalError: z.function(),
+  setPageLoading: z.function(),
+  setSidebarCollapsed: z.function(),
+  setSidebarWidth: z.function(),
+  setTheme: z.function(),
+  toggleSidebar: z.function(),
+});
+
+/** TypeScript type for UI store actions. */
+export type UiStoreActions = z.infer<typeof uiStoreActionsSchema>;
+
+/**
+ * Zod schema for budget store state.
+ * Manages budgets, expenses, exchange rates, and current budget selection.
+ */
+export const budgetStoreStateSchema = z
+  .object({
+    budgets: z.record(
+      z.string(),
+      z.object({
+        categories: z.record(
+          z.string(),
+          z.object({
+            allocated: NON_NEGATIVE_NUMBER_SCHEMA,
+            spent: NON_NEGATIVE_NUMBER_SCHEMA,
+          })
+        ),
+        currency: primitiveSchemas.isoCurrency,
+        expenses: z.array(
+          z.object({
+            amount: POSITIVE_NUMBER_SCHEMA,
+            category: z.string(),
+            createdAt: TIMESTAMP_SCHEMA,
+            currency: primitiveSchemas.isoCurrency,
+            date: z.iso.date(),
+            description: z.string(),
+            id: UUID_SCHEMA,
+          })
+        ),
+        spent: NON_NEGATIVE_NUMBER_SCHEMA,
+        total: POSITIVE_NUMBER_SCHEMA,
+        tripId: UUID_SCHEMA,
+        updatedAt: TIMESTAMP_SCHEMA,
+      })
+    ),
+    currentBudget: z
+      .object({
+        categories: z.looseRecord(z.string(), z.unknown()),
+        currency: primitiveSchemas.isoCurrency,
+        expenses: z.array(z.unknown()),
+        spent: NON_NEGATIVE_NUMBER_SCHEMA,
+        total: POSITIVE_NUMBER_SCHEMA,
+        tripId: UUID_SCHEMA,
+      })
+      .nullable(),
+    exchangeRates: z.record(z.string(), z.number().positive()),
+  })
+  .extend(LOADING_STATE_SCHEMA.shape);
+
+/** TypeScript type for budget store state. */
+export type BudgetStoreState = z.infer<typeof budgetStoreStateSchema>;
+
+/**
+ * Zod schema for budget store actions.
+ * Validates action function signatures for budget store.
+ */
+export const budgetStoreActionsSchema = z.object({
+  addExpense: z.function(),
+  convertCurrency: z.function(),
+  createBudget: z.function(),
+  deleteBudget: z.function(),
+  deleteExpense: z.function(),
+  fetchBudget: z.function(),
+  fetchExchangeRates: z.function(),
+  reset: z.function(),
+  updateBudget: z.function(),
+  updateCategory: z.function(),
+  updateExpense: z.function(),
+});
+
+/** TypeScript type for budget store actions. */
+export type BudgetStoreActions = z.infer<typeof budgetStoreActionsSchema>;
+
+/**
+ * Zod schema for API key store state.
+ * Manages API keys, service status, and usage tracking.
+ */
+export const apiKeyStoreStateSchema = z
+  .object({
+    keys: z.array(
+      z.object({
+        createdAt: TIMESTAMP_SCHEMA,
+        id: UUID_SCHEMA,
+        isActive: z.boolean(),
+        key: z.string(),
+        lastUsed: TIMESTAMP_SCHEMA.optional(),
+        name: z.string(),
+        service: z.enum(["openai", "anthropic", "google", "amadeus", "skyscanner"]),
+        usageCount: NON_NEGATIVE_NUMBER_SCHEMA,
+      })
+    ),
+    services: z.record(
+      z.string(),
+      z.object({
+        description: z.string(),
+        lastCheck: TIMESTAMP_SCHEMA.optional(),
+        name: z.string(),
+        status: z.enum(["connected", "disconnected", "error"]),
+      })
+    ),
+  })
+  .extend(LOADING_STATE_SCHEMA.shape);
+
+/** TypeScript type for API key store state. */
+export type ApiKeyStoreState = z.infer<typeof apiKeyStoreStateSchema>;
+
+/**
+ * Zod schema for API key store actions.
+ * Validates action function signatures for API key store.
+ */
+export const apiKeyStoreActionsSchema = z.object({
+  checkServiceStatus: z.function(),
+  createKey: z.function(),
+  deleteKey: z.function(),
+  fetchKeys: z.function(),
+  reset: z.function(),
+  testKey: z.function(),
+  toggleKey: z.function(),
+  updateKey: z.function(),
+});
+
+/** TypeScript type for API key store actions. */
+export type ApiKeyStoreActions = z.infer<typeof apiKeyStoreActionsSchema>;

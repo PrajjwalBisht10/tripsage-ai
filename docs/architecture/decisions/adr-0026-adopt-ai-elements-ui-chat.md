@@ -1,0 +1,35 @@
+# ADR-0026: Adopt AI Elements for Chat UI
+
+**Version**: 1.0.0
+**Status**: Accepted
+**Date**: 2025-11-01
+**Category**: frontend
+**Domain**: AI SDK / Next.js App Router
+**Related ADRs**: [ADR-0023](adr-0023-adopt-ai-sdk-v6-foundations.md)
+**Related Specs**: [SPEC-0008](spec-ai-sdk-v6-foundations.md)
+
+## Context
+
+The project previously shipped bespoke chat UIs and hooks spread across `src/components/chat` and feature modules (now under `src/features/chat`), with mixed transports (websocket, custom SSE) and duplicated logic. AI SDK v6 ships AI Elements primitives and `useChat` that standardize message shape, streaming, and tool usage.
+
+## Decision
+
+- Use AI Elements primitives for conversation, messages, and prompt input.
+- Standardize client transport on `@ai-sdk/react` with `DefaultChatTransport`.
+- Provide a Next.js route handler at `src/app/api/chat/route.ts` using `streamText(…).toUIMessageStreamResponse()` to serve the AI SDK v6 UI message stream protocol.
+- Add a simple first-party page `src/app/chat/page.tsx` to render the chat UI and wire prompt submission.
+
+## Consequences
+
+- Reduces bespoke UI code and aligns with AI SDK v6 patterns.
+- Establishes a clear streaming contract (AI SDK UI message stream protocol) for the chat UI.
+- Enables progressive enhancement of tool usage visualization without custom protocols.
+
+## Alternatives considered
+
+- UI Message Stream with manual client parsing: `useChat` + UI message stream protocol provides robust default behavior.
+- Retrofitting custom chat components: rejected in favor of library-first approach.
+
+## Migration notes
+
+- Legacy chat pages/components are deleted as part of FINAL-ONLY cleanup once the AI Elements implementation is complete.

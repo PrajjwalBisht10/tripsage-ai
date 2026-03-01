@@ -1,0 +1,295 @@
+/**
+ * @fileoverview Password reset form component.
+ */
+
+"use client";
+
+import {
+  AlertCircleIcon,
+  ArrowLeftIcon,
+  CheckCircle2Icon,
+  Loader2Icon,
+  MailIcon,
+} from "lucide-react";
+import Link from "next/link";
+import React from "react";
+import { z } from "zod";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { getClientEnv } from "@/lib/env/client";
+import { cn } from "@/lib/utils";
+import { statusVariants } from "@/lib/variants/status";
+
+/** Schema for validating password reset response payload. */
+const ResetResponseSchema = z.looseObject({
+  error: z.string().optional(),
+  message: z.string().optional(),
+});
+
+/**
+ * Props for the ResetPasswordForm component.
+ */
+interface ResetPasswordFormProps {
+  /** Additional CSS classes for styling. */
+  className?: string;
+}
+
+const DEFAULT_SUCCESS_MESSAGE =
+  "Password reset instructions have been sent to your email";
+/**
+ * Password reset form component.
+ *
+ * Allows users to request password reset emails. Handles form submission,
+ * feedback messages, and navigation.
+ *
+ * @param props - Component props
+ * @param props.className - Additional CSS classes
+ * @returns The password reset form JSX element
+ */
+export function ResetPasswordForm({ className }: ResetPasswordFormProps) {
+  const [email, setEmail] = React.useState("");
+  const [isSuccess, setIsSuccess] = React.useState(false);
+  const [message, setMessage] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [isLoading, setIsLoading] = React.useState(false);
+  const emailFieldId = React.useId();
+
+  // Memoize path calculations since they depend only on static env config
+  const { resetRequestPath, loginPath, supportPath } = React.useMemo(() => {
+    const basePath = (getClientEnv().NEXT_PUBLIC_BASE_PATH ?? "").trim();
+    const normalizedBasePath = basePath ? `/${basePath.replace(/^\/+|\/+$/g, "")}` : "";
+    return {
+      loginPath: `${normalizedBasePath}/login`,
+      resetRequestPath: `${normalizedBasePath}/auth/password/reset-request`,
+      supportPath: `${normalizedBasePath}/contact`,
+    };
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (isLoading) return;
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail) return;
+
+    try {
+      setIsLoading(true);
+      setError(null);
+      const response = await fetch(resetRequestPath, {
+        body: JSON.stringify({ email: trimmedEmail }),
+        headers: { "Content-Type": "application/json" },
+        method: "POST",
+      });
+      // Parse and validate response with Zod for runtime guarantees
+      const rawData = await response.json().catch(() => ({}));
+      const parseResult = ResetResponseSchema.safeParse(rawData);
+      const data = parseResult.success
+        ? parseResult.data
+        : { error: undefined, message: undefined };
+      if (!parseResult.success && process.env.NODE_ENV === "development") {
+        console.warn(
+          "Reset password response validation failed:",
+          parseResult.error.issues
+        );
+      }
+      if (!response.ok) {
+        setError(data.message ?? data.error ?? "Failed to send reset email");
+        setIsLoading(false);
+        return;
+      }
+      setIsSuccess(true);
+      setMessage(
+        typeof data.message === "string" ? data.message : DEFAULT_SUCCESS_MESSAGE
+      );
+      setIsLoading(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send reset email");
+      setIsLoading(false);
+    }
+  };
+
+  React.useEffect(() => {
+    if (isSuccess) {
+      const timer = setTimeout(() => {
+        // Redirect back to login after a short delay for convenience.
+        window.location.assign(loginPath);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+    return undefined;
+  }, [isSuccess, loginPath]);
+
+  return (
+    <Card className={className}>
+      <CardHeader className="space-y-1">
+        <div className="flex items-center justify-center space-x-2">
+          <MailIcon className="h-6 w-6 text-primary" />
+          <CardTitle className="text-2xl">Reset your password</CardTitle>
+        </div>
+        <CardDescription className="text-center">
+          Enter your email address and we&apos;ll send you instructions to reset your
+          password
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isSuccess ? (
+          <div className="space-y-4">
+            <Alert className={cn(statusVariants({ status: "success" }))}>
+              <CheckCircle2Icon className="h-4 w-4" />
+              <AlertDescription>
+                {message || "Password reset instructions have been sent to your email"}
+              </AlertDescription>
+            </Alert>
+
+            <div className="space-y-3 text-center">
+              <p className="text-sm text-muted-foreground">
+                Check your email inbox for instructions on how to reset your password.
+              </p>
+              <p className="text-sm text-muted-foreground">
+                If you don&apos;t see the email, check your spam folder.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Redirecting to login in 5 seconds…
+              </p>
+            </div>
+
+            <Button className="w-full" variant="outline" asChild>
+              <Link href={loginPath}>
+                <ArrowLeftIcon aria-hidden="true" className="mr-2 h-4 w-4" />
+                Return to Sign In
+              </Link>
+            </Button>
+
+            <div className="text-center">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsSuccess(false);
+                  setMessage(null);
+                  setError(null);
+                }}
+                className="text-sm text-primary hover:underline"
+              >
+                Didn&apos;t receive the email? Try again
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {error && (
+              <Alert variant="destructive">
+                <AlertCircleIcon aria-hidden="true" className="h-4 w-4" />
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor={emailFieldId}>Email Address</Label>
+              <Input
+                id={emailFieldId}
+                name="email"
+                type="email"
+                placeholder="john@example.com"
+                required
+                autoComplete="email"
+                disabled={isLoading}
+                className="w-full"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (error) setError(null);
+                }}
+              />
+              <p className="text-xs text-muted-foreground">
+                We&apos;ll send password reset instructions to this email address
+              </p>
+            </div>
+
+            <Button type="submit" className="w-full" disabled={isLoading}>
+              {isLoading ? (
+                <>
+                  <Loader2Icon
+                    aria-hidden="true"
+                    className="mr-2 h-4 w-4 animate-spin"
+                  />
+                  Sending instructions…
+                </>
+              ) : (
+                <>
+                  <MailIcon aria-hidden="true" className="mr-2 h-4 w-4" />
+                  Send Reset Instructions
+                </>
+              )}
+            </Button>
+
+            <div className="flex items-center justify-center space-x-1 text-sm text-muted-foreground">
+              <ArrowLeftIcon aria-hidden="true" className="h-3 w-3" />
+              <Link
+                href={loginPath}
+                className="text-primary hover:underline font-medium"
+              >
+                Back to sign in
+              </Link>
+            </div>
+          </form>
+        )}
+
+        <div className="mt-6 text-center text-xs text-muted-foreground">
+          <p>
+            Having trouble?{" "}
+            <Link href={supportPath} className="text-primary hover:underline">
+              Contact support
+            </Link>
+          </p>
+        </div>
+
+        {process.env.NODE_ENV === "development" && (
+          <div className="mt-6 p-3 bg-muted rounded-lg">
+            <p className="text-xs text-muted-foreground text-center mb-2">
+              Development Mode - Test Password Reset
+            </p>
+            <div className="text-xs text-center">
+              <p>Reset instructions will be logged to console</p>
+              <p>Check browser console for mock email content</p>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * Skeleton loading state for the password reset form.
+ *
+ * Displays placeholder content while the password reset form is loading.
+ *
+ * @returns The password reset form skeleton JSX element
+ */
+export function ResetPasswordFormSkeleton() {
+  return (
+    <Card className="w-full max-w-md">
+      <CardHeader className="space-y-1">
+        <div className="h-8 bg-muted rounded animate-pulse" />
+        <div className="h-4 bg-muted rounded animate-pulse" />
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="space-y-2">
+          <div className="h-4 bg-muted rounded animate-pulse" />
+          <div className="h-10 bg-muted rounded animate-pulse" />
+          <div className="h-3 bg-muted rounded animate-pulse" />
+        </div>
+        <div className="h-10 bg-muted rounded animate-pulse" />
+        <div className="h-4 bg-muted rounded animate-pulse mx-auto w-32" />
+      </CardContent>
+    </Card>
+  );
+}

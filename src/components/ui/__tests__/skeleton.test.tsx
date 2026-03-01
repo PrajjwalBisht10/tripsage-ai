@@ -1,0 +1,100 @@
+/** @vitest-environment jsdom */
+
+import { screen } from "@testing-library/react";
+import { describe, expect, it } from "vitest";
+import { render } from "@/test/test-utils";
+import { Skeleton } from "../skeleton";
+
+describe("Skeleton", () => {
+  it("renders a basic skeleton", () => {
+    render(<Skeleton data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toBeInTheDocument();
+    expect(skeleton).toHaveAttribute("role", "status");
+    expect(skeleton).toHaveAttribute("aria-label", "Loading content…");
+  });
+
+  it("applies custom width and height", () => {
+    render(<Skeleton width="200px" height="100px" data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveStyle({
+      height: "100px",
+      width: "200px",
+    });
+  });
+
+  it("applies numeric width and height", () => {
+    render(<Skeleton width={300} height={150} data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveStyle({
+      height: "150px",
+      width: "300px",
+    });
+  });
+
+  it("renders multiple lines", () => {
+    const { container } = render(<Skeleton lines={3} data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toBeInTheDocument();
+
+    // Should have multiple skeleton divs for lines
+    const skeletonLines = container.querySelectorAll(".skeleton");
+    expect(skeletonLines).toHaveLength(3);
+  });
+
+  it("applies custom className", () => {
+    render(<Skeleton className="custom-class" data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveClass("custom-class");
+  });
+
+  it("disables animation when animate is false", () => {
+    render(<Skeleton animate={false} data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    // When animation is disabled, it should have empty animation class
+    expect(skeleton).toHaveClass("skeleton");
+    // Check that animate-pulse is not applied when animation=none
+    expect(skeleton.className).not.toMatch(/animate-pulse/);
+  });
+
+  it("applies different variants", () => {
+    const { rerender } = render(<Skeleton variant="light" data-testid="skeleton" />);
+    let skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveClass("bg-muted/60");
+
+    rerender(<Skeleton variant="medium" data-testid="skeleton" />);
+    skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveClass("bg-muted/80");
+
+    rerender(<Skeleton variant="rounded" data-testid="skeleton" />);
+    skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveClass("rounded-full");
+  });
+
+  it("applies wave animation", () => {
+    render(<Skeleton animation="wave" data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveClass("animate-[wave_1.5s_ease-in-out_infinite]");
+  });
+
+  it("forwards ref correctly", () => {
+    const ref = { current: null };
+    render(<Skeleton ref={ref} data-testid="skeleton" />);
+
+    expect(ref.current).toBeInstanceOf(HTMLDivElement);
+  });
+
+  it("supports accessibility attributes", () => {
+    render(<Skeleton aria-label="Custom loading message" data-testid="skeleton" />);
+
+    const skeleton = screen.getByTestId("skeleton");
+    expect(skeleton).toHaveAttribute("aria-label", "Custom loading message");
+  });
+});

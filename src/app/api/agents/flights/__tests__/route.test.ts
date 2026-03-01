@@ -1,0 +1,190 @@
+/** @vitest-environment node */
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  setRateLimitFactoryForTests,
+  setSupabaseFactoryForTests,
+} from "@/lib/api/factory";
+import { TEST_USER_ID } from "@/test/helpers/ids";
+import {
+  createMockNextRequest,
+  createRouteParamsContext,
+  getMockCookiesForTest,
+} from "@/test/helpers/route";
+import { createMockSupabaseClient } from "@/test/mocks/supabase";
+
+vi.mock("@/lib/agents/config-resolver", () => ({
+  resolveAgentConfig: vi.fn(async () => ({
+    config: {
+      agentType: "flightAgent",
+      createdAt: "2025-01-01T00:00:00Z",
+      id: "v1700000000_deadbeef",
+      model: "gpt-4o-mini",
+      parameters: {
+        description: "Flight search agent",
+        maxOutputTokens: 4096,
+        model: "gpt-4o-mini",
+        temperature: 0.7,
+        timeoutSeconds: 30,
+        topKTools: 4,
+        topP: 0.9,
+      },
+      scope: "global",
+      updatedAt: "2025-01-01T00:00:00Z",
+    },
+    versionId: "v1700000000_deadbeef",
+  })),
+}));
+
+const mockLimitFn = vi.fn().mockResolvedValue({
+  limit: 30,
+  remaining: 29,
+  reset: Date.now() + 60000,
+  success: true,
+});
+
+// Mock next/headers cookies() before any imports that use it
+vi.mock("next/headers", () => ({
+  cookies: vi.fn(() =>
+    Promise.resolve(getMockCookiesForTest({ "sb-access-token": "test-token" }))
+  ),
+}));
+
+// Mock Supabase server client
+vi.mock("@/lib/supabase/server", () => ({
+  createServerSupabase: vi.fn(async () => ({
+    auth: {
+      getUser: async () => ({
+        data: { user: { id: TEST_USER_ID } },
+        error: null,
+      }),
+    },
+  })),
+}));
+
+// Mock provider registry
+vi.mock("@ai/models/registry", () => ({
+  resolveProvider: vi.fn(async () => ({ model: {}, modelId: "gpt-4o" })),
+}));
+
+// Mock flight agent
+vi.mock("@ai/agents", () => ({
+  createFlightAgent: vi.fn(() => ({
+    agent: {},
+    agentType: "flightAgent",
+    defaultMessages: [{ content: "schema", role: "user" }],
+    modelId: "gpt-4o",
+  })),
+}));
+
+// Mock createAgentUIStreamResponse with actual streaming Response
+const mockConsumeStream = vi.fn();
+const mockCreateAgentUIStreamResponse = vi.fn(() => {
+  const stream = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("data: test\n\n"));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" },
+    status: 200,
+  });
+});
+vi.mock("ai", () => ({
+  consumeStream: mockConsumeStream,
+  createAgentUIStreamResponse: mockCreateAgentUIStreamResponse,
+  InvalidToolInputError: { isInstance: () => false },
+  NoSuchToolError: { isInstance: () => false },
+  Output: { object: () => ({}) },
+}));
+
+// Mock Redis
+vi.mock("@/lib/redis", () => ({
+  getRedis: vi.fn(() => ({})),
+}));
+
+// Mock route helpers
+vi.mock("@/lib/api/route-helpers", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/api/route-helpers")>(
+    "@/lib/api/route-helpers"
+  );
+  return {
+    ...actual,
+    withRequestSpan: vi.fn((_name, _attrs, fn) => fn()),
+  };
+});
+
+describe("/api/agents/flights route", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    setRateLimitFactoryForTests(async () => mockLimitFn());
+    setSupabaseFactoryForTests(async () =>
+      createMockSupabaseClient({ user: { id: TEST_USER_ID } })
+    );
+    mockLimitFn.mockResolvedValue({
+      limit: 30,
+      remaining: 29,
+      reset: Date.now() + 60000,
+      success: true,
+    });
+  });
+
+  afterEach(() => {
+    setRateLimitFactoryForTests(null);
+    setSupabaseFactoryForTests(null);
+  });
+
+  it("streams when valid and enabled", async () => {
+    const mod = await import("../route");
+    const req = createMockNextRequest({
+      body: {
+        departureDate: "2025-12-15",
+        destination: "JFK",
+        origin: "SFO",
+        passengers: 1,
+      },
+      method: "POST",
+      url: "http://localhost/api/agents/flights",
+    });
+    const res = await mod.POST(req, createRouteParamsContext());
+    expect(res.status).toBe(200);
+    expect(mockCreateAgentUIStreamResponse).toHaveBeenCalledTimes(1);
+
+    // Assert that createAgentUIStreamResponse was called with expected structure
+    expect(mockCreateAgentUIStreamResponse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agent: expect.any(Object),
+        consumeSseStream: mockConsumeStream,
+        uiMessages: expect.any(Array),
+      })
+    );
+  });
+
+  it("returns 429 when the rate limit is exceeded", async () => {
+    mockLimitFn.mockResolvedValueOnce({
+      limit: 30,
+      remaining: 0,
+      reset: Date.now() + 60000,
+      success: false,
+    });
+
+    const mod = await import("../route");
+    const req = createMockNextRequest({
+      body: {
+        departureDate: "2025-12-15",
+        destination: "JFK",
+        origin: "SFO",
+        passengers: 1,
+      },
+      method: "POST",
+      url: "http://localhost/api/agents/flights",
+    });
+
+    const res = await mod.POST(req, createRouteParamsContext());
+    expect(res.status).toBe(429);
+    const payload = await res.json();
+    expect(payload.error).toBe("rate_limit_exceeded");
+    expect(mockLimitFn).toHaveBeenCalledTimes(1);
+  });
+});

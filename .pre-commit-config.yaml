@@ -1,0 +1,61 @@
+# Pre-commit hooks configuration for TripSage AI
+# See https://pre-commit.com for more information
+# Install with: pre-commit install
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-added-large-files
+        args: ["--maxkb=1000"]
+      - id: check-merge-conflict
+      - id: debug-statements
+
+  # Frontend formatting
+  - repo: local
+    hooks:
+      - id: biome-format
+        name: biome-format
+        entry: bash -c 'pnpm format:biome'
+        language: system
+        files: ^(src|e2e|scripts)/.*\.(ts|tsx|js|jsx|json)$
+        stages: [commit]
+
+  # Frontend linting
+  - repo: local
+    hooks:
+      - id: biome-check
+        name: biome-check
+        entry: bash -c 'pnpm biome:check'
+        language: system
+        files: ^(src|e2e|scripts)/.*\.(ts|tsx|js|jsx|json)$
+        stages: [commit]
+
+  # Frontend type checking
+  - repo: local
+    hooks:
+      - id: typescript-check
+        name: typescript-check
+        entry: bash -c 'pnpm type-check'
+        language: system
+        files: ^(src|e2e)/.*\.(ts|tsx)$
+        pass_filenames: false
+        stages: [commit]
+
+ci:
+  autofix_commit_msg: |
+    [pre-commit.ci] auto fixes from pre-commit.com hooks
+
+    for more information, see https://pre-commit.ci
+  autofix_prs: true
+  autoupdate_branch: ""
+  autoupdate_commit_msg: "[pre-commit.ci] pre-commit autoupdate"
+  autoupdate_schedule: weekly
+  skip: []
+  submodules: false

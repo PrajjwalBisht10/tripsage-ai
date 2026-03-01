@@ -1,0 +1,34 @@
+# ADR-0044: AI SDK v6 Tool Registry and MCP Integration
+
+**Date:** 2025-11-11
+**Status:** Accepted
+**Version:** 1.0.0
+**Category:** frontend
+**Domain:** AI SDK v6
+
+## Context
+
+- We are migrating from Python LangChain-style tools to a unified TypeScript tool registry using AI SDK v6 under `src/ai/tools/`.
+- External APIs must be integrated via maintained clients or MCP where available (Airbnb via SSE/HTTP MCP, Duffel, Google Maps, OpenWeather, Firecrawl).
+
+## Decision
+
+- Implement a centralized tool registry `src/ai/tools/index.ts` and domain tools (`web-search`, `web-crawl`, `weather`, `flights`, `maps`, `accommodations`, `memory`).
+- Integrate the tool registry into the canonical streaming chat handler (`src/app/api/chat/_handler.ts`) for `POST /api/chat`.
+- MCP integration is an optional future enhancement (server-only, credentials server-only). It is **not** currently enabled in production code.
+- Require all server tools under `src/ai/tools/server` to use `createAiTool` with `outputSchema` + `validateOutput: true`; CI enforces this via `scripts/check-ai-tools.mjs`.
+- Enforce security via:
+  - Upstash Redis caching and simple rate-limit-compatible patterns.
+  - Approval gating for sensitive operations (e.g., booking) in `src/ai/tools/server/approvals.ts`.
+  - Timeouts and error mapping inside each tool's execute function.
+
+## Consequences
+
+- Single implementation path on the frontend for tools; Python tool modules become obsolete and are candidates for deletion.
+- Frontend gates (Biome, tsc, Vitest) validate the new implementation, and tool guardrails prevent raw `tool()` usage in server tools.
+- Backend endpoints remain available for non-tool features until follow-up decommission.
+
+## References
+
+- Tool registry: `src/ai/tools/index.ts`
+- Chat integration: `src/app/api/chat/_handler.ts`

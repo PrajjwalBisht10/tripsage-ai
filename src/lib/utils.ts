@@ -1,0 +1,177 @@
+/**
+ * @fileoverview Small DOM-agnostic utilities for formatting and timing. All helpers are pure and safe for both server and browser runtimes.
+ */
+
+import { type ClassValue, clsx } from "clsx";
+import { twMerge } from "tailwind-merge";
+import { DateUtils } from "@/lib/dates/unified-date-utils";
+
+/**
+ * Compose Tailwind class strings with conflict resolution.
+ *
+ * @param inputs Class tokens and conditional fragments.
+ * @returns Merged className string.
+ */
+export function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+/**
+ * Format a date-like value as a long US date (e.g., January 1, 2025).
+ *
+ * @param input Date instance, timestamp, or ISO string.
+ * @returns Human-readable date string.
+ */
+export function formatDate(input: string | number | Date): string {
+  let date: Date;
+  if (input instanceof Date) {
+    date = input;
+  } else if (typeof input === "number") {
+    date = new Date(input);
+  } else {
+    date = DateUtils.parse(input);
+  }
+  return DateUtils.format(date, "MMMM d, yyyy");
+}
+
+/**
+ * Test if a string is a syntactically valid URL.
+ *
+ * @param url Candidate URL string.
+ * @returns True when `new URL(url)` succeeds.
+ */
+export function isValidUrl(url: string): boolean {
+  try {
+    new URL(url);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
+/**
+ * Truncate a string and append an ellipsis when exceeded.
+ *
+ * @param str Source string.
+ * @param length Maximum length before truncation.
+ * @returns Original string or truncated with `…` (ellipsis), not exceeding `length`.
+ */
+export function truncate(str: string, length: number): string {
+  if (length <= 0) return "";
+  if (str.length <= length) {
+    return str;
+  }
+
+  if (length === 1) return "…";
+
+  // Keep total output length <= `length` by reserving one character for the ellipsis.
+  return `${str.slice(0, length - 1)}…`;
+}
+
+/**
+ * Format a number as currency in the en-US locale.
+ *
+ * @param amount Numeric amount.
+ * @param currency ISO 4217 code (default: `USD`).
+ * @returns Formatted currency string.
+ */
+export function formatCurrency(amount: number, currency = "USD"): string {
+  return new Intl.NumberFormat("en-US", {
+    currency,
+    style: "currency",
+  }).format(amount);
+}
+
+/**
+ * Return a debounced function that postpones invocation until after `delay`.
+ *
+ * @typeParam T Callable type.
+ * @param fn Target function to debounce.
+ * @param delay Delay in milliseconds.
+ * @returns Debounced function.
+ */
+export function debounce<T extends (...args: unknown[]) => unknown>(
+  fn: T,
+  delay: number
+): (...args: Parameters<T>) => void {
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  return (...args: Parameters<T>) => {
+    clearTimeout(timeoutId);
+    timeoutId = setTimeout(() => fn(...args), delay);
+  };
+}
+
+/**
+ * Return a throttled function that invokes at most once per `delay` window.
+ *
+ * @typeParam T Callable type.
+ * @param fn Target function to throttle.
+ * @param delay Minimum interval in milliseconds between calls.
+ * @returns Throttled function.
+ */
+export function throttle<T extends (...args: unknown[]) => unknown>(
+  fn: T,
+  delay: number
+): (...args: Parameters<T>) => void {
+  let lastCall = 0;
+
+  return (...args: Parameters<T>) => {
+    const now = Date.now();
+
+    if (now - lastCall < delay) {
+      return;
+    }
+
+    lastCall = now;
+    return fn(...args);
+  };
+}
+
+/**
+ * Execute a promise without awaiting while observing rejections.
+ *
+ * @param promise Promise to execute in fire-and-forget mode.
+ * @param onError Optional handler when the promise rejects.
+ */
+export function fireAndForget<T>(
+  promise: Promise<T>,
+  onError?: (error: unknown) => void
+): void {
+  const handleRejection = (_error: unknown) => {
+    if (onError) {
+      onError(_error);
+      return;
+    }
+
+    // Warn about missing error handler in development
+    const isClientDev =
+      typeof window !== "undefined" && process.env.NODE_ENV === "development";
+
+    if (isClientDev) {
+      console.warn(
+        "fireAndForget called without onError handler. Errors will be silently suppressed in production.",
+        {
+          error: _error,
+          stack: _error instanceof Error ? _error.stack : undefined,
+        }
+      );
+    }
+
+    // Swallow rejection silently when no handler provided
+    // Error tracking should be done at the call site with proper context
+  };
+
+  Promise.resolve(promise).catch(handleRejection);
+}
+
+/**
+ * Clamp a number to the valid percentage range [0, 100].
+ *
+ * @param value Input value to clamp.
+ * @returns Value constrained to [0, 100]. Returns 0 for NaN inputs.
+ */
+export function clampProgress(value: number): number {
+  if (Number.isNaN(value)) return 0;
+  return Math.min(100, Math.max(0, value));
+}

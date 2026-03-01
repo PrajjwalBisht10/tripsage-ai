@@ -15,7 +15,7 @@ import {
   WalletIcon,
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { BudgetChart } from "@/components/ai-elements/budget-chart";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -28,6 +28,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { saveGeneration } from "@/lib/generations/actions";
 import { MAIN_CONTENT_ID } from "@/lib/a11y/landmarks";
 import { cn } from "@/lib/utils";
 
@@ -193,6 +194,16 @@ export default function UserBudgetPage() {
   const [output, setOutput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const lastSavedOutputRef = useRef<string>("");
+
+  useEffect(() => {
+    if (isLoading || !output) return;
+    const parsed = parseBudgetResponse(output);
+    if (parsed.kind !== "budget" || output === lastSavedOutputRef.current) return;
+    lastSavedOutputRef.current = output;
+    const title = `${destination.trim() || "Trip"} Budget`;
+    saveGeneration({ type: "budget", title, payload: parsed.data }).catch(() => {});
+  }, [output, isLoading, destination]);
 
   const logTelemetry = useCallback((status: "success" | "error") => {
     fetch("/api/telemetry/ai-demo", {

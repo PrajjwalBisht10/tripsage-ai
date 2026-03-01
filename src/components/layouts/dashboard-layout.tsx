@@ -25,15 +25,10 @@ export interface DashboardLayoutData {
 
 export const DASHBOARD_NAV_ITEMS: ReadonlyArray<DashboardNavItem> = [
   { href: ROUTES.dashboard.root, title: "Overview" },
-  { href: ROUTES.dashboard.trips, title: "My Trips" },
-  { href: ROUTES.dashboard.search, title: "Search" },
-  { href: ROUTES.dashboard.calendar, title: "Calendar" },
-  // Chat is intentionally outside the dashboard namespace; keep `/chat` public.
-  { href: ROUTES.chat, title: "AI Assistant" },
-  { href: ROUTES.dashboard.agentStatus, title: "Agent Status" },
-  { href: ROUTES.dashboard.security, title: "Security" },
-  { href: ROUTES.dashboard.settings, title: "Settings" },
-  { href: ROUTES.dashboard.profile, title: "Profile" },
+  { href: ROUTES.userItinerary, title: "Itinerary" },
+  { href: ROUTES.userBudget, title: "Budget" },
+  { href: ROUTES.userRoutes, title: "Route planner" },
+  { href: ROUTES.userCalendarPlan, title: "Calendar plan" },
 ];
 
 /** Guest user shown when not authenticated (login disabled for demo). */

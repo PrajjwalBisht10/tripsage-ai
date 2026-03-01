@@ -7,6 +7,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DashboardMetrics } from "@/features/dashboard/components/dashboard-metrics";
 import { QuickActionsCompact } from "@/features/dashboard/components/quick-actions";
+import { RecentGenerations } from "@/features/dashboard/components/recent-generations";
 import { RecentTrips } from "@/features/dashboard/components/recent-trips";
 import { TripSuggestions } from "@/features/dashboard/components/trip-suggestions";
 import { UpcomingFlights } from "@/features/dashboard/components/upcoming-flights";
@@ -125,6 +126,19 @@ function DashboardContent() {
 
       {/* Dashboard Metrics */}
       <DashboardMetrics />
+
+      {/* Recent activity (itinerary, budget, route) */}
+      <Suspense
+        fallback={
+          <Card>
+            <CardContent className="p-6">
+              <Skeleton className="h-32 w-full" />
+            </CardContent>
+          </Card>
+        }
+      >
+        <RecentGenerations limit={10} />
+      </Suspense>
 
       {/* Main Content Grid */}
       <div className="grid gap-6 lg:grid-cols-2 xl:grid-cols-3">

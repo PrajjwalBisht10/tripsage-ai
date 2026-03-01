@@ -13,7 +13,7 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   RouteCard,
   type RouteJson,
@@ -22,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { MarketingContainer } from "@/components/marketing/marketing-container";
+import { saveGeneration } from "@/lib/generations/actions";
 import { MAIN_CONTENT_ID } from "@/lib/a11y/landmarks";
 import { cn } from "@/lib/utils";
 
@@ -197,6 +198,16 @@ export default function UserRoutesPage() {
   const [output, setOutput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const lastSavedOutputRef = useRef<string>("");
+
+  useEffect(() => {
+    if (isLoading || !output) return;
+    const parsed = parseRouteResponse(output);
+    if (parsed.kind !== "route" || output === lastSavedOutputRef.current) return;
+    lastSavedOutputRef.current = output;
+    const title = `${parsed.data.destination?.trim() || destination.trim() || "Trip"} Route`;
+    saveGeneration({ type: "route", title, payload: parsed.data }).catch(() => {});
+  }, [output, isLoading, destination]);
 
   const addSuggestion = useCallback((text: string) => {
     setPlaces((prev) => (prev ? `${prev}\n${text}` : text));

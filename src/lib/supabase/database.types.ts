@@ -1862,6 +1862,41 @@ export type Database = {
           },
         ];
       };
+      user_feature_generations: {
+        Row: {
+          id: number;
+          user_id: string;
+          type: string;
+          title: string;
+          payload: Json;
+          created_at: string;
+        };
+        Insert: {
+          id?: never;
+          user_id: string;
+          type: string;
+          title: string;
+          payload?: Json;
+          created_at?: string;
+        };
+        Update: {
+          id?: never;
+          user_id?: string;
+          type?: string;
+          title?: string;
+          payload?: Json;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "user_feature_generations_user_id_fkey";
+            columns: ["user_id"];
+            isOneToOne: false;
+            referencedRelation: "users";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       mfa_backup_code_audit: {
         Row: {
           count: number;

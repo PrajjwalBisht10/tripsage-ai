@@ -26,6 +26,8 @@ import { generateIcsFromEvents, sanitizeCalendarFilename } from "@/lib/calendar/
  */
 export const POST = withApiGuards({
   auth: true,
+  degradedMode:
+    process.env.NODE_ENV === "development" ? "fail_open" : undefined,
   rateLimit: "calendar:ics:export",
   schema: icsExportRequestSchema,
   telemetry: "calendar.ics.export",

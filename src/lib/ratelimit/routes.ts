@@ -62,6 +62,8 @@ export const ROUTE_RATE_LIMITS = {
   "calendar:events:update": { limit: 10, window: "1 m" },
   "calendar:freebusy": { limit: 60, window: "1 m" },
   "calendar:ics:export": { limit: 20, window: "1 m" },
+  "calendar:pdf:export": { limit: 20, window: "1 m" },
+  "calendar:google:sync": { limit: 10, window: "1 m" },
   "calendar:ics:import": { limit: 10, window: "1 m" },
   "calendar:status": { limit: 60, window: "1 m" },
 

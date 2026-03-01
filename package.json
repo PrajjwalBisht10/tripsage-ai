@@ -137,6 +137,7 @@
     "ical.js": "^2.2.1",
     "import-in-the-middle": "3.0.0",
     "js-tiktoken": "^1.0.21",
+    "jspdf": "^4.2.0",
     "katex": "^0.16.28",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.563.0",

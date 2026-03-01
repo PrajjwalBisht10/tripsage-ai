@@ -14,11 +14,12 @@ import {
   SparklesIcon,
 } from "lucide-react";
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ItineraryCard,
   type ItineraryJson,
 } from "@/components/ai-elements/itinerary-card";
+import { saveGeneration } from "@/lib/generations/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MarketingContainer } from "@/components/marketing/marketing-container";
@@ -271,7 +272,18 @@ export default function UserItineraryPage() {
   const [output, setOutput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const lastSavedOutputRef = useRef<string>("");
   const submitStatus = error ? "error" : isLoading ? "submitted" : undefined;
+
+  // Persist successful itinerary to DB for Overview and Calendar plan "Load last"
+  useEffect(() => {
+    if (isLoading || !output) return;
+    const parsed = parseItineraryResponse(output);
+    if (parsed.kind !== "itinerary" || output === lastSavedOutputRef.current) return;
+    lastSavedOutputRef.current = output;
+    const title = `${parsed.data.destination?.trim() || "Trip"} Itinerary`;
+    saveGeneration({ type: "itinerary", title, payload: parsed.data }).catch(() => {});
+  }, [output, isLoading]);
 
   const addSuggestion = useCallback((word: string) => {
     setInput((prev) => (prev ? `${prev}, ${word}` : word));

@@ -17,6 +17,8 @@ export const ROUTES = {
   userItinerary: "/user/itinerary",
   /** Location-aware routing: optimize order and neighborhoods, with map */
   userRoutes: "/user/routes",
+  /** Calendar-ready planning: itinerary to dated schedule + export */
+  userCalendarPlan: "/user/calendar-plan",
 
   // Chat
   chat: "/chat",

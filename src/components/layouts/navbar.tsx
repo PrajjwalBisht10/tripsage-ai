@@ -1,5 +1,6 @@
 /**
  * @fileoverview App navbar with navigation links and mobile drawer toggle.
+ * On /user/* (feature) pages: logo links to dashboard; when logged in, Login/Sign up are hidden.
  */
 
 "use client";
@@ -7,9 +8,11 @@
 import { CalendarIcon, MapPinIcon, MenuIcon, XIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useAuthCore } from "@/features/auth/store/auth/auth-core";
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/ui/theme-toggle";
+import { UserNav } from "@/components/layouts/user-nav";
 import { ROUTES } from "@/lib/routes";
 import { cn } from "@/lib/utils";
 
@@ -30,12 +33,21 @@ const NavItems = [
 export function Navbar() {
   const pathname = usePathname();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const initialize = useAuthCore((s) => s.initialize);
+  const isAuthenticated = useAuthCore((s) => s.isAuthenticated);
+  const user = useAuthCore((s) => s.user);
+
+  useEffect(() => {
+    initialize().catch(() => undefined);
+  }, [initialize]);
+
+  const logoHref = pathname.startsWith("/user/") ? ROUTES.dashboard.root : "/";
 
   return (
     <header className="sticky top-0 z-50 border-b bg-background/90 backdrop-blur supports-[backdrop-filter]:bg-background/70">
       <div className="mx-auto flex h-16 w-full max-w-6xl items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-8">
-          <Link href="/" className="font-bold text-xl flex items-center">
+          <Link href={logoHref} className="font-bold text-xl flex items-center">
             TripSage<span className="text-highlight ml-1">AI</span>
           </Link>
 
@@ -60,12 +72,18 @@ export function Navbar() {
         {/* User section */}
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <Button variant="outline" size="sm" asChild>
-            <Link href={ROUTES.login}>Log in</Link>
-          </Button>
-          <Button size="sm" asChild>
-            <Link href={ROUTES.register}>Sign up</Link>
-          </Button>
+          {isAuthenticated && user ? (
+            <UserNav user={user} />
+          ) : (
+            <>
+              <Button variant="outline" size="sm" asChild>
+                <Link href={ROUTES.login}>Log in</Link>
+              </Button>
+              <Button size="sm" asChild>
+                <Link href={ROUTES.register}>Sign up</Link>
+              </Button>
+            </>
+          )}
 
           {/* Mobile menu button */}
           <Button
